@@ -1,23 +1,39 @@
 import pandas as pd
-import pytest
+from pathlib import Path
 
-from src import features, pricing, utils
-
-
-def prepare():
-    config = utils.load_config()
-    df = pd.read_csv("examples/sample_players.csv")
-    feats = features.build_features(df)
-    return feats, config
+from src import pricing
 
 
-def test_heuristic_price_budget():
-    feats, config = prepare()
-    priced = pricing.heuristic_price(feats, config["scoring_weights"], config["budget"])
-    assert pytest.approx(priced["fair_price"].sum(), abs=1e-6) == config["budget"]
+def test_train_derived_prices(tmp_path):
+    processed = Path("data/processed")
+    processed.mkdir(parents=True, exist_ok=True)
 
+    quotes = pd.DataFrame(
+        {
+            "name": ["Player A"],
+            "team": ["AAA"],
+            "role": ["F"],
+            "price_500": [10],
+        }
+    )
+    stats = pd.DataFrame(
+        {
+            "name": ["Player A"],
+            "team": ["AAA"],
+            "role": ["F"],
+            "goals": [1],
+            "assists": [0],
+            "mins": [90],
+        }
+    )
 
-def test_baseline_price_budget():
-    feats, config = prepare()
-    priced = pricing.baseline_linear(feats, config["budget"])
-    assert pytest.approx(priced["fair_price"].sum(), abs=1e-6) == config["budget"]
+    quotes.to_csv(processed / "quotes_2025_26_FVM_budget500.csv", index=False)
+    stats.to_csv(processed / "stats_master_with_weights.csv", index=False)
+    (processed / "goalkeepers_grid_matrix_square.csv").write_text("")
+
+    assert pricing.list_missing_required_inputs() == []
+
+    out = pricing.train_derived_prices(overwrite=True)
+    assert out["rows"] == 1
+    assert Path(out["csv_path"]).exists()
+    assert Path(out["db_path"]).exists()
