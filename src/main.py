@@ -22,8 +22,8 @@ def parse_args() -> argparse.Namespace:
     p_price = sub.add_parser("price", help="Estimate prices")
     p_price.add_argument("--method", choices=["baseline", "heuristic"], default="baseline")
 
-    # Deprecated: kept for backward compatibility but performs no action
-    sub.add_parser("train-prices", help="(deprecated) train price model")
+    p_train = sub.add_parser("train-prices", help="Train price model")
+    p_train.add_argument("--method", choices=["linear", "tree"], default="linear")
 
     p_rank = sub.add_parser("rank", help="Rank players")
     p_rank.add_argument("--by", default="value")
@@ -64,8 +64,16 @@ def main() -> None:
         dataio.save_parquet(priced, out_path)
         logger.info("Saved prices to %s", out_path)
     elif args.command == "train-prices":
-        logger.warning("Derived prices rimossi: comando deprecato")
-        return
+        processed = utils.resolve_path(config, "processed")
+        stats_path = processed / "stats_master_with_weights.csv"
+        quotes_path = processed / "quotes_2025_26_FVM_budget500.csv"
+        stats = dataio.load_stats(stats_path)
+        quotes = dataio.load_quotes(quotes_path)
+        derived = pricing.train_price_model(stats, quotes, args.method)
+        out_path = processed / "derived_prices.csv"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        derived.to_csv(out_path, index=False)
+        logger.info("Saved derived prices to %s", out_path)
     elif args.command == "rank":
         in_path = utils.resolve_path(config, "processed") / "prices.parquet"
         df = dataio.load_parquet(in_path)
