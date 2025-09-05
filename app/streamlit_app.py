@@ -18,6 +18,7 @@ from src import dataio, pricing, services
 
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
+Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 AUCTION_LOG = f"{OUTPUT_DIR}/auction_log.csv"
 ENGINE = create_engine(f"sqlite:///{OUTPUT_DIR}/fanta.db")
 
@@ -54,20 +55,14 @@ def prepare_processed_data() -> None:
         df.to_csv(out, index=False)
 
 
-def train_derived_prices() -> pd.DataFrame:
-    stats_path = Path(BASE_PROCESSED["stats"])
-    quotes_path = Path(BASE_PROCESSED["quotes"])
-    stats = dataio.load_stats(stats_path)
-    quotes = dataio.load_quotes(quotes_path)
+def train_derived_prices() -> Path:
+    stats = dataio.load_stats(Path(BASE_PROCESSED["stats"]))
+    quotes = dataio.load_quotes(Path(BASE_PROCESSED["quotes"]))
     derived_df = pricing.train_price_model(stats, quotes, "linear")
     out_path = Path(f"{DATA_PROCESSED}/derived_prices.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     derived_df.to_csv(out_path, index=False)
-    try:
-        derived_df.to_sql("derived_prices", ENGINE, if_exists="replace", index=False)
-    except Exception as exc:
-        st.error(f"Failed to persist derived prices: {exc}")
-    return derived_df
+    return out_path
 
 
 st.sidebar.subheader("Data Setup")
@@ -85,6 +80,7 @@ if st.sidebar.button("Train derived prices"):
         st.sidebar.error(f"Failed to train prices: {exc}")
     else:
         st.sidebar.success("Derived prices trained")
+        st.cache_data.clear()
         st.rerun()
 
 if "confirm_reset" not in st.session_state:
