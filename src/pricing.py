@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import logging
+import inspect
 from typing import Dict
 
 import numpy as np
@@ -182,37 +183,61 @@ def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
 
 def _load_builder():
     """
-    Trova la funzione che costruisce i derived prices con la priorità corretta:
-    1) funzioni locali nel modulo corrente (se presenti):
-       - build_derived_prices
-       - compute_derived_prices
-    2) fallback su src.services (se presenti):
-       - services.build_derived_prices
-       - services.compute_derived_prices
+    Seleziona una funzione *pura* che costruisce i derived prices (niente I/O DB e
+    soprattutto nessuna chiamata a train_derived_prices, per evitare ricorsioni).
+    Ordine di ricerca:
+      1) locale: build_derived_prices / compute_derived_prices
+      2) src.services: build_derived_prices / compute_derived_prices
+    Vengono scartati i candidati che nel body contengono 'train_derived_prices('.
     """
-    # 1) prova funzioni locali già definite in questo modulo
+
+    def valid_builder(fn):
+        try:
+            src = inspect.getsource(fn)
+        except OSError:
+            # se non recupero il sorgente, accetto comunque
+            return True
+        # scarta builder che chiamano train_derived_prices (loop sicuro)
+        return "train_derived_prices(" not in src
+
+    # 1) candidati locali
+    chosen = None
     g = globals()
     for name in ("build_derived_prices", "compute_derived_prices"):
-        if name in g and callable(g[name]):
-            return g[name]
+        if name in g and callable(g[name]) and valid_builder(g[name]):
+            chosen = g[name]
+            break
 
-    # 2) fallback su services.*
+    # 2) candidati in services.*
+    if chosen is None:
+        try:
+            from .services import build_derived_prices as b1  # type: ignore
+            if callable(b1) and valid_builder(b1):
+                chosen = b1
+        except Exception:
+            pass
+    if chosen is None:
+        try:
+            from .services import compute_derived_prices as b2  # type: ignore
+            if callable(b2) and valid_builder(b2):
+                chosen = b2
+        except Exception:
+            pass
+
+    if chosen is None:
+        raise RuntimeError(
+            "Non trovo una funzione 'pura' per calcolare i derived prices. "
+            "Definisci build_derived_prices()/compute_derived_prices() che NON chiami "
+            "train_derived_prices(), oppure mettila in src/services.py."
+        )
+
+    # log diagnostico (si vede nella caption già presente in Streamlit)
     try:
-        from .services import build_derived_prices as builder  # type: ignore
-        return builder
+        origin = inspect.getsourcefile(chosen) or "<?>"
+        logging.info("Derived-prices builder scelto: %s @ %s", chosen.__name__, origin)
     except Exception:
         pass
-    try:
-        from .services import compute_derived_prices as builder  # type: ignore
-        return builder
-    except Exception:
-        pass
-
-    raise RuntimeError(
-        "Non trovo una funzione per calcolare i derived prices. "
-        "Definisci build_derived_prices()/compute_derived_prices() in src/pricing.py "
-        "oppure in src/services.py."
-    )
+    return chosen
 
 
 def _drop_table_and_indexes(engine, table_name: str) -> None:
