@@ -68,14 +68,14 @@ if st.sidebar.button("Prepare processed data"):
     try:
         prepare_processed_data()
         st.sidebar.success("Processed data generated")
-        st.experimental_rerun()
+        st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Failed to prepare data: {exc}")
 if st.sidebar.button("Train derived prices"):
     try:
         train_derived_prices()
         st.sidebar.success("Derived prices trained")
-        st.experimental_rerun()
+        st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Failed to train prices: {exc}")
 
