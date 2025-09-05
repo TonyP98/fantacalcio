@@ -195,12 +195,6 @@ def _load_builder():
     """
 
     def valid_builder(fn):
-        # Se il codice del builder fa riferimento a train_derived_prices, scartalo.
-        try:
-            if "train_derived_prices" in fn.__code__.co_names:
-                return False
-        except Exception:
-            pass
         try:
             src = inspect.getsource(fn)
         except OSError:
