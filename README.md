@@ -4,6 +4,8 @@ Strumento locale per analisi prezzi e performance dei calciatori in fase d'asta.
 
 ## Setup rapido
 
+Aggiornare `pip`, `setuptools` e `wheel` prima di installare le dipendenze:
+
 ```bash
 python -m venv .venv
 . .venv/bin/activate  # Windows: .venv\Scripts\activate
