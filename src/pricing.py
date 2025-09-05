@@ -18,7 +18,10 @@ DERIVED_CSV = Path("data/processed/derived_prices.csv")
 # Allinea al path visto nello UI: data/processed/fanta.db (override via env se serve)
 DB_PATH = Path(os.getenv("FANTA_DB_PATH", "data/processed/fanta.db"))
 TABLE_NAME = "derived_prices"
-MODULE_VERSION = "pricing-2025-09-05-3"
+# Aggiorna la version per riflettere la patch di prevenzione ricorsione
+MODULE_VERSION = "pricing-2025-09-05-4"
+# Flag per evitare ricorsioni (re-entrance) in train_derived_prices
+_TRAINING_DERIVED_PRICES = False
 
 # ===== MONKEY-PATCH: reset_index() sicuro a livello GLOBALE =====
 # Impedisce il classico ValueError di pandas quando il nome dell'indice
@@ -295,16 +298,23 @@ def _upsert_df(df: pd.DataFrame, engine, table_name: str, conflict_key: str = "i
 
 
 def train_derived_prices(overwrite: bool = False) -> pd.DataFrame:
-    builder = _load_builder()
+    global _TRAINING_DERIVED_PRICES
+    if _TRAINING_DERIVED_PRICES:
+        raise RuntimeError("train_derived_prices() chiamata in modo ricorsivo")
+    _TRAINING_DERIVED_PRICES = True
     try:
-        df = builder()
-    except Exception as e:
-        # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
-        raise RuntimeError(
-            f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
-        ) from e
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
+        builder = _load_builder()
+        try:
+            df = builder()
+        except Exception as e:
+            # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
+            raise RuntimeError(
+                f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
+            ) from e
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
+    finally:
+        _TRAINING_DERIVED_PRICES = False
 
     # Assicura una chiave 'id' stabile per l'UPSERT (se non già presente)
     if "id" not in df.columns:
