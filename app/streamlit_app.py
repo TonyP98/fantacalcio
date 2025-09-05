@@ -13,7 +13,10 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine
 
-from src import dataio, pricing, services
+from src import dataio, services
+import importlib
+import src.pricing as pricing
+pricing = importlib.reload(pricing)
 
 
 DATA_PROCESSED = "data/processed"
@@ -55,16 +58,6 @@ def prepare_processed_data() -> None:
         df.to_csv(out, index=False)
 
 
-def train_derived_prices() -> Path:
-    stats = dataio.load_stats(Path(BASE_PROCESSED["stats"]))
-    quotes = dataio.load_quotes(Path(BASE_PROCESSED["quotes"]))
-    derived_df = pricing.train_price_model(stats, quotes, "linear")
-    out_path = Path(f"{DATA_PROCESSED}/derived_prices.csv")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    derived_df.to_csv(out_path, index=False)
-    return out_path
-
-
 st.sidebar.subheader("Data Setup")
 if st.sidebar.button("Prepare processed data"):
     try:
@@ -73,15 +66,18 @@ if st.sidebar.button("Prepare processed data"):
         st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Failed to prepare data: {exc}")
-if st.sidebar.button("Train derived prices"):
+st.caption(
+    f"pricing loaded: {getattr(pricing, 'MODULE_VERSION', '?')} @ {getattr(pricing, '__file__', '?')}"
+)
+overwrite = st.checkbox("Overwrite derived prices (reset table)", value=False)
+if st.button("Train derived prices"):
     try:
-        train_derived_prices()
-    except Exception as exc:
-        st.sidebar.error(f"Failed to train prices: {exc}")
-    else:
-        st.sidebar.success("Derived prices trained")
-        st.cache_data.clear()
-        st.rerun()
+        pricing.train_derived_prices(overwrite=overwrite)
+        st.success(
+            "Derived prices trained. File creato: data/processed/derived_prices.csv"
+        )
+    except Exception as e:  # pragma: no cover - UI feedback
+        st.error(f"Failed to train prices: {e}")
 
 if "confirm_reset" not in st.session_state:
     st.session_state["confirm_reset"] = False
