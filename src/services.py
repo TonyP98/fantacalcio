@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Literal
+import logging
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import Engine, text
 
 
-PRICE_STRATEGY = Literal["estimated", "fvm500", "blend"]
+PRICE_STRATEGY = Literal["fvm500"]
 
 
 def upsert_players(engine: Engine, df: pd.DataFrame) -> None:
@@ -36,34 +37,19 @@ def upsert_players(engine: Engine, df: pd.DataFrame) -> None:
 
 def choose_price(
     players: pd.DataFrame,
-    strategy: PRICE_STRATEGY,
+    strategy: str = "fvm500",
     alpha: float = 0.6,
 ) -> pd.Series:
     """Select an effective price for each player.
 
-    Parameters
-    ----------
-    players:
-        DataFrame with ``price_500`` and ``estimated_price`` columns.
-    strategy:
-        ``"estimated"``, ``"fvm500"`` or ``"blend"``.
-    alpha:
-        Weight for ``estimated_price`` when ``strategy='blend'``.
+    Only the ``fvm500`` strategy is supported.  Any other value will trigger a
+    warning and ``price_500`` will be used.
     """
 
     price_500 = pd.to_numeric(players["price_500"], errors="coerce").fillna(0)
-    est = pd.to_numeric(players.get("estimated_price"), errors="coerce")
-
-    if strategy == "estimated":
-        effective = est.fillna(price_500)
-    elif strategy == "fvm500":
-        effective = price_500
-    elif strategy == "blend":
-        blended = est.fillna(price_500)
-        effective = alpha * blended + (1 - alpha) * price_500
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
-
+    if strategy != "fvm500":
+        logging.warning("Derived prices rimossi; uso price_500")
+    effective = price_500
     return effective.clip(lower=1)
 
 
@@ -90,7 +76,7 @@ def optimize_roster(
     auction_log: pd.DataFrame | None = None,
     budget_total: float = 500,
     team_cap: int = 3,
-    price_strategy: PRICE_STRATEGY = "estimated",
+    price_strategy: PRICE_STRATEGY = "fvm500",
     alpha: float = 0.6,
     allow_low_mins: bool = False,
     grid_matrix: pd.DataFrame | None = None,
