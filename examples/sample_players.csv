@@ -1,0 +1,13 @@
+name,team,role,price,goals,assists,mins,pens_scored,pens_missed,yc,rc
+Player1,AAA,ATT,10,15,5,2800,3,1,2,0
+Player2,BBB,ATT,12,10,7,2700,2,0,3,0
+Player3,CCC,MID,8,5,10,2600,1,0,5,0
+Player4,DDD,MID,6,4,6,2400,0,0,6,1
+Player5,EEE,DEF,5,2,3,3000,0,0,8,0
+Player6,FFF,DEF,4,1,1,3100,0,0,7,1
+Player7,GGG,DEF,3,0,2,3200,0,0,4,0
+Player8,HHH,MID,9,7,8,2500,1,0,3,0
+Player9,III,ATT,11,18,4,2900,4,1,2,0
+Player10,JJJ,ATT,13,12,9,2600,2,0,5,0
+Player11,KKK,MID,7,3,5,2300,0,0,6,0
+Player12,LLL,DEF,2,0,1,2000,0,0,3,0
