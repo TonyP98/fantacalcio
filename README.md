@@ -41,3 +41,32 @@ File di input richiesti per il training:
 - `quotes_2025_26_FVM_budget500.csv`
 - `stats_master_with_weights.csv`
 - `goalkeepers_grid_matrix_square.csv`
+
+## UI
+
+L'app Streamlit offre:
+
+- barra di ricerca con dettagli del giocatore e raccomandazione BUY/AVOID;
+- gestione del log d'asta con aggiornamento di budget e roster;
+- ottimizzatore del roster completo.
+
+### Strategie di prezzo
+
+Le strategie disponibili sono:
+
+- `estimated`: usa `estimated_price` se disponibile, altrimenti `price_500`;
+- `fvm500`: usa sempre `price_500`;
+- `blend`: combina i due prezzi con peso \(\alpha\).
+
+Il punteggio di valore è `expected_points / effective_price`.
+
+### Roster Optimizer
+
+L'ottimizzatore seleziona 25 giocatori (3P/8D/8C/6A) rispettando il budget
+di 500 crediti e il vincolo di massimo 3 giocatori per squadra.
+Il roster consigliato è salvato in `data/outputs/recommended_roster.csv`.
+
+### Esportazioni
+
+Il pannello "Il mio roster" mostra i giocatori acquistati e permette di
+esportare il roster in `data/outputs/my_roster.csv`.

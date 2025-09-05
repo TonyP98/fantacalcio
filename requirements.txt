@@ -9,3 +9,4 @@ matplotlib==3.9.0
 pyyaml==6.0.2
 pytest==8.2.0
 pyarrow>=15.0.0     # required by pandas.to_parquet
+streamlit==1.38.0
