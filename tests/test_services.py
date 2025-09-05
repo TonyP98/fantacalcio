@@ -16,31 +16,25 @@ def _sample_players() -> pd.DataFrame:
                     "role": role,
                     "expected_points": 10 + i,
                     "price_500": 10,
-                    "estimated_price": 12,
                     "apps": 10,
                 }
             )
     return pd.DataFrame(rows)
 
 
-def test_choose_price_blend_and_fallback():
-    df = pd.DataFrame(
-        {
-            "price_500": [10, 20],
-            "estimated_price": [15, np.nan],
-        }
-    )
-    blended = services.choose_price(df, "blend", alpha=0.5)
-    assert blended.iloc[0] == 12.5
-    assert blended.iloc[1] == 20
-
-    est = services.choose_price(df, "estimated")
-    assert est.iloc[1] == 20
+def test_choose_price_fallback(caplog):
+    df = pd.DataFrame({"price_500": [10, 20]})
+    with caplog.at_level("WARNING"):
+        prices = services.choose_price(df, "estimated")
+    assert prices.tolist() == [10, 20]
+    assert "Derived prices rimossi" in caplog.text
 
 
 def test_optimizer_respects_quotas_and_budget():
     players = _sample_players()
-    roster = services.optimize_roster(players, budget_total=500, team_cap=10, price_strategy="fvm500")
+    roster = services.optimize_roster(
+        players, budget_total=500, team_cap=10, price_strategy="fvm500"
+    )
     assert len(roster) == sum(services.QUOTAS.values())
     counts = roster["role"].value_counts().to_dict()
     for role, qty in services.QUOTAS.items():
