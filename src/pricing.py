@@ -8,9 +8,15 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge, RidgeCV
+from sqlalchemy import MetaData, create_engine, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+import sqlalchemy
 
 
 FEATURE_COLS = ["goals_per90", "assists_per90", "availability"]
+
+DERIVED_CSV = Path("data/processed/derived_prices.csv")
+DB_PATH = Path("data/processed/fanta.db")
 
 
 def _normalize_budget(df: pd.DataFrame, ev: np.ndarray, budget: float) -> pd.DataFrame:
@@ -96,3 +102,69 @@ def train_price_model(
             "estimated_price",
         ]
     ]
+
+
+def build_derived_prices() -> pd.DataFrame:
+    """Construct derived prices DataFrame from processed stats and quotes."""
+    from . import dataio, utils
+
+    config = utils.load_config()
+    processed = utils.resolve_path(config, "processed")
+    stats_path = processed / "stats_master_with_weights.csv"
+    quotes_path = processed / "quotes_2025_26_FVM_budget500.csv"
+    stats = dataio.load_stats(str(stats_path))
+    quotes = dataio.load_quotes(str(quotes_path))
+    return train_price_model(stats, quotes, "linear")
+
+
+def _upsert_derived_prices(
+    df: pd.DataFrame, engine: sqlalchemy.engine.Engine, conflict_key: str = "id"
+) -> None:
+    """Upsert rows of ``df`` into ``derived_prices`` table using SQLite ON CONFLICT."""
+    meta = MetaData()
+    meta.reflect(bind=engine)
+    if "derived_prices" not in meta.tables:
+        df.to_sql("derived_prices", engine, if_exists="replace", index=False)
+        return
+
+    table = meta.tables["derived_prices"]
+    cols = list(df.columns)
+    update_cols = {
+        c: getattr(sqlite_insert(table).excluded, c) for c in cols if c != conflict_key
+    }
+    records = df.to_dict(orient="records")
+
+    with engine.begin() as conn:
+        for row in records:
+            stmt = (
+                sqlite_insert(table)
+                .values(**row)
+                .on_conflict_do_update(index_elements=[conflict_key], set_=update_cols)
+            )
+            conn.execute(stmt)
+
+
+def train_derived_prices(overwrite: bool = False) -> pd.DataFrame:
+    """Compute derived prices and persist them to SQLite and CSV."""
+    df = build_derived_prices()
+    if df.empty:
+        raise RuntimeError("Derived prices vuoto: controlla le fasi precedenti della pipeline.")
+
+    if "id" not in df.columns:
+        key_cols = [c for c in ["player_id", "season"] if c in df.columns]
+        if key_cols:
+            df["id"] = df[key_cols].astype(str).agg("_".join, axis=1)
+
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    with engine.begin() as conn:
+        if overwrite:
+            conn.execute(text("DELETE FROM derived_prices"))
+
+    if overwrite:
+        df.to_sql("derived_prices", engine, if_exists="append", index=False)
+    else:
+        _upsert_derived_prices(df, engine, conflict_key="id")
+
+    DERIVED_CSV.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(DERIVED_CSV, index=False)
+    return df
