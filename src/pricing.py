@@ -1,347 +1,271 @@
 from __future__ import annotations
-import os
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-import logging
-import inspect
-from typing import Dict
+from typing import Dict, List, Tuple
 
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge, RidgeCV
-from sqlalchemy import create_engine, MetaData, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import create_engine, text
 
-FEATURE_COLS = ["goals_per90", "assists_per90", "availability"]
+##
+##  High-level goal
+##  ----------------
+##  Provide a robust, non-recursive training pipeline for "derived prices":
+##   - strictly separate INPUTS vs OUTPUTS (no self-dependency on derived_prices.csv)
+##   - write both CSV and SQLite table consistently
+##   - be idempotent and safe (overwrite/append, deduplicate)
+##
 
-DERIVED_CSV = Path("data/processed/derived_prices.csv")
-# Allinea al path visto nello UI: data/processed/fanta.db (override via env se serve)
-DB_PATH = Path(os.getenv("FANTA_DB_PATH", "data/processed/fanta.db"))
-TABLE_NAME = "derived_prices"
-MODULE_VERSION = "pricing-2025-09-05-3"
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+PROCESSED_DIR = DATA_DIR / "processed"
+OUTPUTS_DIR = DATA_DIR / "outputs"
 
-# ===== MONKEY-PATCH: reset_index() sicuro a livello GLOBALE =====
-# Impedisce il classico ValueError di pandas quando il nome dell'indice
-# coincide con una colonna già esistente (es. 'id').
-_ORIG_RESET_INDEX = pd.DataFrame.reset_index
+DB_PATH = PROCESSED_DIR / "fanta.db"
+DERIVED_CSV = PROCESSED_DIR / "derived_prices.csv"
 
-def _reset_index_safe_global(
-    self: pd.DataFrame,
-    level=None,
-    drop: bool = False,
-    inplace: bool = False,
-    col_level: int = 0,
-    col_fill: str = "",
-):
-    try:
-        if not drop:
-            idx = self.index
-            if isinstance(idx, pd.MultiIndex):
-                idx_names = list(idx.names)
-            else:
-                idx_names = [idx.name]
-            candidate_names = [n for n in idx_names if n is not None]
-            if not candidate_names:
-                candidate_names = ["index"]
-            if level is not None:
-                if isinstance(level, (list, tuple)):
-                    level_names = []
-                    for lv in level:
-                        if isinstance(idx, pd.MultiIndex):
-                            name = idx.names[lv] if isinstance(lv, int) else lv
-                        else:
-                            name = idx.name if lv in (0, None) else lv
-                        level_names.append(name if name is not None else "index")
-                    candidate_names = [n if n is not None else "index" for n in level_names]
-                else:
-                    if isinstance(idx, pd.MultiIndex):
-                        name = idx.names[level] if isinstance(level, int) else level
-                    else:
-                        name = idx.name if level in (0, None) else level
-                    candidate_names = [name if name is not None else "index"]
-            if any(name in self.columns for name in candidate_names):
-                drop = True
-    except Exception:
-        pass
-    return _ORIG_RESET_INDEX(
-        self,
-        level=level,
-        drop=drop,
-        inplace=inplace,
-        col_level=col_level,
-        col_fill=col_fill,
-    )
-
-pd.DataFrame.reset_index = _reset_index_safe_global
-# ===== FINE MONKEY-PATCH =====
+# True INPUTS (from README)
+REQUIRED_INPUTS = [
+    PROCESSED_DIR / "quotes_2025_26_FVM_budget500.csv",
+    PROCESSED_DIR / "stats_master_with_weights.csv",
+    PROCESSED_DIR / "goalkeepers_grid_matrix_square.csv",  # kept as hard dep to stay aligned with README
+]
 
 
-def _normalize_budget(df: pd.DataFrame, ev: np.ndarray, budget: float) -> pd.DataFrame:
-    total = ev.sum()
-    factor = budget / total if total else 0
-    out = df.copy()
-    out["expected_value"] = ev
-    out["fair_price"] = ev * factor
-    return out
+def _engine():
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    return create_engine(f"sqlite:///{DB_PATH}")
 
 
-def baseline_linear(df: pd.DataFrame, budget: float) -> pd.DataFrame:
-    X = df[FEATURE_COLS]
-    y = df["price"]
-    model = Ridge(alpha=1.0)
-    model.fit(X, y)
-    ev = model.predict(X)
-    return _normalize_budget(df, ev, budget)
-
-
-def heuristic_price(df: pd.DataFrame, weights: Dict[str, float], budget: float) -> pd.DataFrame:
-    score = (
-        df["goals"] * weights["gol"]
-        + df["assists"] * weights["assist"]
-        + df["yc"] * weights["amm"]
-        + df["rc"] * weights["esp"]
-        + df["pens_scored"] * weights["rigore_segnato"]
-        + df["pens_missed"] * weights["rigore_sbagliato"]
-    )
-    ev = score.to_numpy()
-    return _normalize_budget(df, ev, budget)
-
-
-def train_price_model(
-    stats: pd.DataFrame, quotes: pd.DataFrame, method: str = "linear"
-) -> pd.DataFrame:
-    """Train model to estimate fair prices from stats and quotes."""
-    numeric_cols = [
-        c
-        for c in stats.select_dtypes(include="number").columns
-        if c not in {"season", "season_weight"}
-    ]
-    weighted = stats.copy()
-    weighted[numeric_cols] = weighted[numeric_cols].multiply(
-        weighted["season_weight"], axis=0
-    )
-    agg = (
-        weighted.groupby(["id", "name", "team", "role"])[numeric_cols]
-        .sum()
-        .reset_index()
-    )
-    df = agg.merge(quotes, on=["id", "name", "team", "role"], how="inner")
-    X = df[numeric_cols]
-    y = df["fvm"]
-
-    if method == "linear":
-        model = RidgeCV(alphas=np.logspace(-3, 3, 7))
-        model.fit(X, y)
-        summary = {col: coef for col, coef in zip(numeric_cols, model.coef_)}
-    else:
-        model = RandomForestRegressor(max_depth=5, n_estimators=100, random_state=0)
-        model.fit(X, y)
-        summary = {
-            col: imp for col, imp in zip(numeric_cols, model.feature_importances_)
-        }
-
-    df["estimated_price"] = model.predict(X)
-
-    out_path = Path("data/outputs/price_model_summary.txt")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as fh:
-        for col, val in summary.items():
-            fh.write(f"{col}: {val}\n")
-
-    return df[
-        [
-            "id",
-            "name",
-            "team",
-            "role",
-            "fvm",
-            "price_from_fvm_500",
-            "estimated_price",
-        ]
-    ]
-
-
-def build_derived_prices() -> pd.DataFrame:
-    """Construct derived prices DataFrame from processed stats and quotes."""
-    from . import dataio, utils
-
-    config = utils.load_config()
-    processed = utils.resolve_path(config, "processed")
-    stats_path = processed / "stats_master_with_weights.csv"
-    quotes_path = processed / "quotes_2025_26_FVM_budget500.csv"
-    stats = dataio.load_stats(str(stats_path))
-    quotes = dataio.load_quotes(str(quotes_path))
-    return train_price_model(stats, quotes, "linear")
-
-
-def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    df.to_csv(tmp, index=False)
-    os.replace(tmp, path)
-
-
-def _load_builder():
-    """
-    Seleziona una funzione *pura* che costruisce i derived prices (niente I/O DB e
-    soprattutto nessuna chiamata a train_derived_prices, per evitare ricorsioni).
-    Ordine di ricerca:
-      1) locale: build_derived_prices / compute_derived_prices
-      2) src.services: build_derived_prices / compute_derived_prices
-    Vengono scartati i candidati che nel body contengono 'train_derived_prices('.
-    """
-
-    def valid_builder(fn):
-        try:
-            src = inspect.getsource(fn)
-        except OSError:
-            # se non recupero il sorgente, accetto comunque
-            return True
-        # scarta builder che chiamano train_derived_prices (loop sicuro)
-        return "train_derived_prices(" not in src
-
-    # 1) candidati locali
-    chosen = None
-    g = globals()
-    for name in ("build_derived_prices", "compute_derived_prices"):
-        if name in g and callable(g[name]) and valid_builder(g[name]):
-            chosen = g[name]
-            break
-
-    # 2) candidati in services.*
-    if chosen is None:
-        try:
-            from .services import build_derived_prices as b1  # type: ignore
-            if callable(b1) and valid_builder(b1):
-                chosen = b1
-        except Exception:
-            pass
-    if chosen is None:
-        try:
-            from .services import compute_derived_prices as b2  # type: ignore
-            if callable(b2) and valid_builder(b2):
-                chosen = b2
-        except Exception:
-            pass
-
-    if chosen is None:
-        raise RuntimeError(
-            "Non trovo una funzione 'pura' per calcolare i derived prices. "
-            "Definisci build_derived_prices()/compute_derived_prices() che NON chiami "
-            "train_derived_prices(), oppure mettila in src/services.py."
-        )
-
-    # log diagnostico (si vede nella caption già presente in Streamlit)
-    try:
-        origin = inspect.getsourcefile(chosen) or "<?>"
-        logging.info("Derived-prices builder scelto: %s @ %s", chosen.__name__, origin)
-    except Exception:
-        pass
-    return chosen
-
-
-def _drop_table_and_indexes(engine, table_name: str) -> None:
-    """Drop tabella e relativi indici (inclusi UNIQUE) così l'overwrite è davvero pulito."""
-    with engine.begin() as conn:
-        idx = conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t"),
-            {"t": table_name},
-        ).fetchall()
-        for (idx_name,) in idx:
-            conn.execute(text(f"DROP INDEX IF EXISTS {idx_name}"))
-        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
-
-
-def debug_schema() -> str:
-    """Ritorna DDL della tabella e indici per diagnosi veloce in UI."""
-    engine = create_engine(f"sqlite:///{DB_PATH}")
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT type,name,sql FROM sqlite_master "
-                "WHERE (name=:t) OR (type='index' AND tbl_name=:t)"
-            ),
-            {"t": TABLE_NAME},
-        ).fetchall()
-    if not rows:
-        return f"-- {TABLE_NAME} non esiste su {DB_PATH}"
-    return "\n\n".join(f"-- {t} {n}\n{sql}" for t, n, sql in rows if sql)
+def list_missing_required_inputs() -> List[str]:
+    """Return the list of missing *INPUT* files required to train.
+    IMPORTANT: this must NOT include the output CSV `derived_prices.csv`."""
+    missing = [str(p) for p in REQUIRED_INPUTS if not p.exists()]
+    return missing
 
 
 def reset_derived_prices_table() -> None:
-    """API esplicita di reset per Streamlit."""
-    engine = create_engine(f"sqlite:///{DB_PATH}")
-    _drop_table_and_indexes(engine, TABLE_NAME)
+    """Drop table and any related objects if present."""
+    eng = _engine()
+    with eng.begin() as cx:
+        cx.execute(text("DROP TABLE IF EXISTS derived_prices"))
+        # If you had indexes/views on this table, drop them here as well.
 
 
-def _upsert_df(df: pd.DataFrame, engine, table_name: str, conflict_key: str = "id") -> None:
-    meta = MetaData()
-    meta.reflect(bind=engine)
-    if table_name not in meta.tables:
-        df.to_sql(table_name, engine, if_exists="replace", index=False)
-        return
-    table = meta.tables[table_name]
-    cols = list(df.columns)
-    set_clause = {c: getattr(sqlite_insert(table).excluded, c) for c in cols if c != conflict_key}
-    rows = df.to_dict(orient="records")
-    with engine.begin() as conn:
-        for row in rows:
-            stmt = (
-                sqlite_insert(table)
-                .values(**row)
-                .on_conflict_do_update(index_elements=[conflict_key], set_=set_clause)
+def debug_derived_prices_schema() -> str:
+    """Return CREATE TABLE statement (or a note if table missing)."""
+    eng = _engine()
+    with eng.begin() as cx:
+        res = cx.execute(
+            text(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type='table' AND name='derived_prices'
+                """
             )
-            conn.execute(stmt)
+        ).fetchone()
+        if not res or not res[0]:
+            return "-- table 'derived_prices' does not exist yet"
+        return res[0]
 
 
-def train_derived_prices(overwrite: bool = False) -> pd.DataFrame:
-    builder = _load_builder()
-    try:
-        df = builder()
-    except Exception as e:
-        # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
+# -------------------------------
+#  Core training implementation
+# -------------------------------
+
+@dataclass
+class TrainOutput:
+    rows: int
+    csv_path: str
+    db_path: str
+    trained_at: str
+
+
+def _read_inputs() -> Dict[str, pd.DataFrame]:
+    missing = list_missing_required_inputs()
+    if missing:
         raise RuntimeError(
-            f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
-        ) from e
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
+            "Input mancanti per il training: " + ", ".join(missing)
+        )
 
-    # Assicura una chiave 'id' stabile per l'UPSERT (se non già presente)
-    if "id" not in df.columns:
-        key_cols = [c for c in ("player_id", "season", "team_id") if c in df.columns]
-        if key_cols:
-            df["id"] = df[key_cols].astype(str).agg("_".join, axis=1)
-        else:
-            # fallback poco elegante ma sicuro (non deterministico tra run diversi)
-            df = df.copy()
-            df.insert(0, "id", range(1, len(df) + 1))
+    quotes = pd.read_csv(REQUIRED_INPUTS[0])
+    stats = pd.read_csv(REQUIRED_INPUTS[1])
+    # The GK grid is not used directly here, but we check for existence to keep logic aligned
+    # with the README and future-proof the pipeline.
+    _ = REQUIRED_INPUTS[2]
 
-    # Pulizia finale robusta prima del salvataggio
-    # 1) Evita nomi di colonna duplicati
-    df = df.loc[:, ~df.columns.duplicated()]
-    # 2) Deduplica eventuali id duplicati (causa comune dei conflitti logici)
-    if "id" in df.columns:
-        dups = int(df.duplicated(subset=["id"]).sum())
-        if dups:
-            logging.warning(
-                "derived_prices: trovati %d id duplicati; conservo l'ultima occorrenza.",
-                dups,
-            )
-            # Ordine di "ultima occorrenza": se esiste una colonna timestamp, usala
-            order_col = "updated_at" if "updated_at" in df.columns else None
-            if order_col:
-                df = df.sort_values(order_col)
-            df = df.drop_duplicates(subset=["id"], keep="last")
+    return {"quotes": quotes, "stats": stats}
 
-    engine = create_engine(f"sqlite:///{DB_PATH}")
-    # se richiesto, resetto la tabella e gli indici per un inserimento "pulito"
-    if overwrite:
-        _drop_table_and_indexes(engine, TABLE_NAME)
 
-    if overwrite:
-        df.to_sql(TABLE_NAME, engine, if_exists="replace", index=False)
-    else:
-        _upsert_df(df, engine, TABLE_NAME, conflict_key="id")
-
-    _atomic_write_csv(df, DERIVED_CSV)
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Make column names predictable (lowercase, underscores)."""
+    df = df.copy()
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
     return df
+
+
+def _compute_expected_points(stats: pd.DataFrame) -> pd.Series:
+    """
+    Compute a simple, robust proxy for expected fantasy points.
+    It is intentionally conservative and tolerant to missing columns.
+    """
+    s = pd.Series(0.0, index=stats.index)
+    def safe(col: str) -> pd.Series:
+        return stats[col] if col in stats.columns else 0.0
+
+    # very simple scoring proxy, tweakable later
+    s = (
+        3.0 * safe("goals")
+        + 1.0 * safe("assists")
+        + 0.02 * safe("mins")
+        - 0.5 * safe("yc")
+        - 1.0 * safe("rc")
+        + 1.0 * safe("pens_scored")
+        - 1.5 * safe("pens_missed")
+    )
+    # Optional weights: if a 'weight' column exists, apply it
+    if "weight" in stats.columns:
+        s = s * stats["weight"].clip(lower=0)
+    return s
+
+
+def _blend_prices(quotes: pd.DataFrame) -> pd.Series:
+    """
+    Build an 'effective' price. If both columns exist we blend,
+    otherwise we fallback to whichever is available.
+    """
+    has_est = "estimated_price" in quotes.columns
+    has_p500 = "price_500" in quotes.columns
+    if has_est and has_p500:
+        # simple 60/40 blend, adjustable later or via config
+        return 0.6 * quotes["estimated_price"].astype(float) + 0.4 * quotes["price_500"].astype(float)
+    if has_est:
+        return quotes["estimated_price"].astype(float)
+    if has_p500:
+        return quotes["price_500"].astype(float)
+    # last resort: create a neutral vector so downstream doesn't explode
+    return pd.Series(0.0, index=quotes.index)
+
+
+def _fit_derived_prices(inputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    quotes = _normalize_columns(inputs["quotes"])
+    stats = _normalize_columns(inputs["stats"])
+
+    # Key for merge: we prioritize 'name', optionally add team/role if present.
+    merge_keys: List[str] = ["name"]
+    if "team" in quotes.columns and "team" in stats.columns:
+        merge_keys.append("team")
+    if "role" in quotes.columns and "role" in stats.columns:
+        merge_keys.append("role")
+
+    df = quotes.merge(stats, on=merge_keys, how="left", suffixes=("_q", "_s"))
+    if df.empty:
+        raise RuntimeError("Join vuoto tra quotes e stats: controlla i campi di chiave (name/team/role).")
+
+    df["expected_points"] = _compute_expected_points(df)
+    df["effective_price"] = _blend_prices(quotes)
+
+    # Guard rail to avoid division by zero
+    df["effective_price"] = df["effective_price"].replace(0, pd.NA).fillna(df["effective_price"].median())
+    df["derived_value"] = (df["expected_points"] / df["effective_price"]).fillna(0.0)
+
+    # A price suggestion, proportional to expected_points but anchored around typical budgets
+    median_price = quotes["price_500"].median() if "price_500" in quotes.columns else 10.0
+    df["derived_price"] = (df["expected_points"].clip(lower=0) / max(df["expected_points"].median(), 1.0)) * median_price
+    df["derived_price"] = df["derived_price"].fillna(median_price).round(2)
+
+    # Metadata
+    df["trained_at"] = datetime.utcnow().isoformat(timespec="seconds")
+
+    # Minimal, stable output columns (add more if needed)
+    keep_cols = [c for c in [
+        "name", "team", "role",
+        "price_500" if "price_500" in quotes.columns else None,
+        "estimated_price" if "estimated_price" in quotes.columns else None,
+        "expected_points",
+        "effective_price",
+        "derived_value",
+        "derived_price",
+        "trained_at",
+    ] if c is not None]
+
+    return df[keep_cols]
+
+
+def _write_outputs(df: pd.DataFrame, overwrite: bool) -> TrainOutput:
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1) CSV
+    if overwrite or not DERIVED_CSV.exists():
+        df.to_csv(DERIVED_CSV, index=False)
+    else:
+        # append with simple de-dup by (name, team, role)
+        old = pd.read_csv(DERIVED_CSV)
+        comb = pd.concat([old, df], ignore_index=True)
+        subset = [c for c in ["name", "team", "role"] if c in comb.columns]
+        if subset:
+            comb = comb.drop_duplicates(subset=subset, keep="last")
+        comb.to_csv(DERIVED_CSV, index=False)
+
+    # 2) DB
+    eng = _engine()
+    if_exists = "replace" if overwrite else "append"
+    with eng.begin() as cx:
+        df.to_sql("derived_prices", con=cx, if_exists=if_exists, index=False)
+        # De-dup in DB as well (if we appended)
+        if if_exists == "append":
+            # keep the latest trained_at per (name, team, role)
+            subset_cols = [c for c in ["name","team","role"] if c in df.columns]
+            if subset_cols:
+                cols = ", ".join(subset_cols)
+                order = "trained_at DESC"
+                cx.execute(text(f"""
+                    CREATE TEMP TABLE _dp AS
+                    SELECT * FROM (
+                        SELECT *, ROW_NUMBER() OVER (PARTITION BY {cols} ORDER BY {order}) AS rn
+                        FROM derived_prices
+                    ) WHERE rn = 1;
+                """))
+                cx.execute(text("DELETE FROM derived_prices;"))
+                cx.execute(text("INSERT INTO derived_prices SELECT * FROM _dp;"))
+                cx.execute(text("DROP TABLE _dp;"))
+
+    return TrainOutput(
+        rows=int(len(df)),
+        csv_path=str(DERIVED_CSV),
+        db_path=str(DB_PATH),
+        trained_at=datetime.utcnow().isoformat(timespec="seconds"),
+    )
+
+
+def train_derived_prices(overwrite: bool = True) -> Dict[str, str]:
+    """
+    Public entry-point used by Streamlit.
+    **No recursion here.** It reads INPUTS -> fits -> writes OUTPUTS.
+    """
+    inputs = _read_inputs()          # may raise clean RuntimeError if inputs missing
+    df = _fit_derived_prices(inputs) # compute model/logic
+    out = _write_outputs(df, overwrite=overwrite)
+    return {
+        "rows": out.rows,
+        "csv_path": out.csv_path,
+        "db_path": out.db_path,
+        "trained_at": out.trained_at,
+    }
+
+
+# -------------------------------
+# Backward compatibility helpers
+# -------------------------------
+# If older parts of the app called helpers that *used to* recurse or
+# expected derived_prices.csv as input, they can be shimmed here safely.
+
+
+def ensure_trained() -> None:
+    """Train if outputs are missing. This is *not* called from train_derived_prices."""
+    if not DERIVED_CSV.exists():
+        train_derived_prices(overwrite=True)
