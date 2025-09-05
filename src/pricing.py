@@ -181,20 +181,37 @@ def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
 
 
 def _load_builder():
-    from importlib import import_module
+    """
+    Trova la funzione che costruisce i derived prices con la priorità corretta:
+    1) funzioni locali nel modulo corrente (se presenti):
+       - build_derived_prices
+       - compute_derived_prices
+    2) fallback su src.services (se presenti):
+       - services.build_derived_prices
+       - services.compute_derived_prices
+    """
+    # 1) prova funzioni locali già definite in questo modulo
+    g = globals()
+    for name in ("build_derived_prices", "compute_derived_prices"):
+        if name in g and callable(g[name]):
+            return g[name]
 
-    for mod_name in ("services", "app.services"):
-        try:
-            module = import_module(mod_name)
-        except ModuleNotFoundError:
-            continue
-        for func_name in ("build_derived_prices", "compute_derived_prices"):
-            fn = getattr(module, func_name, None)
-            if callable(fn):
-                return fn
+    # 2) fallback su services.*
+    try:
+        from .services import build_derived_prices as builder  # type: ignore
+        return builder
+    except Exception:
+        pass
+    try:
+        from .services import compute_derived_prices as builder  # type: ignore
+        return builder
+    except Exception:
+        pass
+
     raise RuntimeError(
         "Non trovo una funzione per calcolare i derived prices. "
-        "Attesi: services.build_derived_prices() o services.compute_derived_prices()."
+        "Definisci build_derived_prices()/compute_derived_prices() in src/pricing.py "
+        "oppure in src/services.py."
     )
 
 
