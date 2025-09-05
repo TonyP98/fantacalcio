@@ -14,7 +14,7 @@ import streamlit as st
 from sqlalchemy import create_engine
 
 from src import dataio, services
-import importlib
+import importlib, traceback
 import src.pricing as pricing
 pricing = importlib.reload(pricing)
 
@@ -69,6 +69,9 @@ if st.sidebar.button("Prepare processed data"):
 st.caption(
     f"pricing loaded: {getattr(pricing, 'MODULE_VERSION', '?')} @ {getattr(pricing, '__file__', '?')}"
 )
+st.caption(
+    f"DB: {getattr(pricing, 'DB_PATH', '?')} | table: {getattr(pricing, 'TABLE_NAME', '?')}"
+)
 overwrite = st.checkbox("Overwrite derived prices (reset table)", value=False)
 if st.button("Train derived prices"):
     try:
@@ -78,6 +81,18 @@ if st.button("Train derived prices"):
         )
     except Exception as e:  # pragma: no cover - UI feedback
         st.error(f"Failed to train prices: {e}")
+        st.exception(e)
+
+st.divider()
+if st.button("Debug derived_prices schema"):
+    st.code(pricing.debug_schema(), language="sql")
+
+if st.button("Reset derived_prices table (drop + drop indexes)"):
+    try:
+        pricing.reset_derived_prices_table()
+        st.success("Tabella derived_prices azzerata.")
+    except Exception as e:
+        st.error(f"Reset fallito: {e}")
 
 if "confirm_reset" not in st.session_state:
     st.session_state["confirm_reset"] = False
