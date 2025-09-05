@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import logging
+import inspect
 from typing import Dict
 
 import numpy as np
@@ -17,7 +18,10 @@ DERIVED_CSV = Path("data/processed/derived_prices.csv")
 # Allinea al path visto nello UI: data/processed/fanta.db (override via env se serve)
 DB_PATH = Path(os.getenv("FANTA_DB_PATH", "data/processed/fanta.db"))
 TABLE_NAME = "derived_prices"
-MODULE_VERSION = "pricing-2025-09-05-3"
+# Aggiorna la version per riflettere la patch di prevenzione ricorsione
+MODULE_VERSION = "pricing-2025-09-05-4"
+# Flag per evitare ricorsioni (re-entrance) in train_derived_prices
+_TRAINING_DERIVED_PRICES = False
 
 # ===== MONKEY-PATCH: reset_index() sicuro a livello GLOBALE =====
 # Impedisce il classico ValueError di pandas quando il nome dell'indice
@@ -182,37 +186,67 @@ def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
 
 def _load_builder():
     """
-    Trova la funzione che costruisce i derived prices con la priorità corretta:
-    1) funzioni locali nel modulo corrente (se presenti):
-       - build_derived_prices
-       - compute_derived_prices
-    2) fallback su src.services (se presenti):
-       - services.build_derived_prices
-       - services.compute_derived_prices
+    Seleziona una funzione *pura* che costruisce i derived prices (niente I/O DB e
+    soprattutto nessuna chiamata a train_derived_prices, per evitare ricorsioni).
+    Ordine di ricerca:
+      1) locale: build_derived_prices / compute_derived_prices
+      2) src.services: build_derived_prices / compute_derived_prices
+    Vengono scartati i candidati che nel body contengono 'train_derived_prices('.
     """
-    # 1) prova funzioni locali già definite in questo modulo
+
+    def valid_builder(fn):
+        # Se il codice del builder fa riferimento a train_derived_prices, scartalo.
+        try:
+            if "train_derived_prices" in fn.__code__.co_names:
+                return False
+        except Exception:
+            pass
+        try:
+            src = inspect.getsource(fn)
+        except OSError:
+            # se non recupero il sorgente, accetto comunque
+            return True
+        # scarta builder che chiamano train_derived_prices (loop sicuro)
+        return "train_derived_prices(" not in src
+
+    # 1) candidati locali
+    chosen = None
     g = globals()
     for name in ("build_derived_prices", "compute_derived_prices"):
-        if name in g and callable(g[name]):
-            return g[name]
+        if name in g and callable(g[name]) and valid_builder(g[name]):
+            chosen = g[name]
+            break
 
-    # 2) fallback su services.*
+    # 2) candidati in services.*
+    if chosen is None:
+        try:
+            from .services import build_derived_prices as b1  # type: ignore
+            if callable(b1) and valid_builder(b1):
+                chosen = b1
+        except Exception:
+            pass
+    if chosen is None:
+        try:
+            from .services import compute_derived_prices as b2  # type: ignore
+            if callable(b2) and valid_builder(b2):
+                chosen = b2
+        except Exception:
+            pass
+
+    if chosen is None:
+        raise RuntimeError(
+            "Non trovo una funzione 'pura' per calcolare i derived prices. "
+            "Definisci build_derived_prices()/compute_derived_prices() che NON chiami "
+            "train_derived_prices(), oppure mettila in src/services.py."
+        )
+
+    # log diagnostico (si vede nella caption già presente in Streamlit)
     try:
-        from .services import build_derived_prices as builder  # type: ignore
-        return builder
+        origin = inspect.getsourcefile(chosen) or "<?>"
+        logging.info("Derived-prices builder scelto: %s @ %s", chosen.__name__, origin)
     except Exception:
         pass
-    try:
-        from .services import compute_derived_prices as builder  # type: ignore
-        return builder
-    except Exception:
-        pass
-
-    raise RuntimeError(
-        "Non trovo una funzione per calcolare i derived prices. "
-        "Definisci build_derived_prices()/compute_derived_prices() in src/pricing.py "
-        "oppure in src/services.py."
-    )
+    return chosen
 
 
 def _drop_table_and_indexes(engine, table_name: str) -> None:
@@ -270,16 +304,23 @@ def _upsert_df(df: pd.DataFrame, engine, table_name: str, conflict_key: str = "i
 
 
 def train_derived_prices(overwrite: bool = False) -> pd.DataFrame:
-    builder = _load_builder()
+    global _TRAINING_DERIVED_PRICES
+    if _TRAINING_DERIVED_PRICES:
+        raise RuntimeError("train_derived_prices() chiamata in modo ricorsivo")
+    _TRAINING_DERIVED_PRICES = True
     try:
-        df = builder()
-    except Exception as e:
-        # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
-        raise RuntimeError(
-            f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
-        ) from e
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
+        builder = _load_builder()
+        try:
+            df = builder()
+        except Exception as e:
+            # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
+            raise RuntimeError(
+                f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
+            ) from e
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
+    finally:
+        _TRAINING_DERIVED_PRICES = False
 
     # Assicura una chiave 'id' stabile per l'UPSERT (se non già presente)
     if "id" not in df.columns:
