@@ -11,6 +11,7 @@ if ROOT not in sys.path:
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import create_engine
 
 from src import dataio, pricing, services
 
@@ -18,6 +19,7 @@ from src import dataio, pricing, services
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
 AUCTION_LOG = f"{OUTPUT_DIR}/auction_log.csv"
+ENGINE = create_engine(f"sqlite:///{OUTPUT_DIR}/fanta.db")
 
 BASE_PROCESSED = {
     "quotes": f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv",
@@ -52,15 +54,20 @@ def prepare_processed_data() -> None:
         df.to_csv(out, index=False)
 
 
-def train_derived_prices() -> None:
+def train_derived_prices() -> pd.DataFrame:
     stats_path = Path(BASE_PROCESSED["stats"])
     quotes_path = Path(BASE_PROCESSED["quotes"])
     stats = dataio.load_stats(stats_path)
     quotes = dataio.load_quotes(quotes_path)
-    derived = pricing.train_price_model(stats, quotes, "linear")
+    derived_df = pricing.train_price_model(stats, quotes, "linear")
     out_path = Path(f"{DATA_PROCESSED}/derived_prices.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    derived.to_csv(out_path, index=False)
+    derived_df.to_csv(out_path, index=False)
+    try:
+        derived_df.to_sql("derived_prices", ENGINE, if_exists="replace", index=False)
+    except Exception as exc:
+        st.error(f"Failed to persist derived prices: {exc}")
+    return derived_df
 
 
 st.sidebar.subheader("Data Setup")
@@ -74,10 +81,25 @@ if st.sidebar.button("Prepare processed data"):
 if st.sidebar.button("Train derived prices"):
     try:
         train_derived_prices()
-        st.sidebar.success("Derived prices trained")
-        st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Failed to train prices: {exc}")
+    else:
+        st.sidebar.success("Derived prices trained")
+        st.rerun()
+
+if "confirm_reset" not in st.session_state:
+    st.session_state["confirm_reset"] = False
+
+if st.sidebar.button("Reset DB"):
+    st.session_state["confirm_reset"] = True
+if st.session_state["confirm_reset"]:
+    st.sidebar.warning("This will delete the database file.")
+    if st.sidebar.button("Confirm reset"):
+        db_path = Path(f"{OUTPUT_DIR}/fanta.db")
+        if db_path.exists():
+            db_path.unlink()
+        st.session_state["confirm_reset"] = False
+        st.rerun()
 
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
@@ -111,6 +133,11 @@ def append_log(entry: dict) -> None:
 
 
 players = load_players() if not DISABLED else pd.DataFrame()
+if not players.empty:
+    try:
+        services.upsert_players(ENGINE, players)
+    except Exception as exc:
+        st.sidebar.error(f"Failed to upsert players: {exc}")
 st.title("Fantacalcio Roster Optimizer")
 
 # price strategy controls
