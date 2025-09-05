@@ -1,7 +1,10 @@
 """Streamlit UI for roster optimisation."""
 from __future__ import annotations
 
-import sys, os
+import os
+import sys
+from pathlib import Path
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -9,29 +12,78 @@ if ROOT not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from src import dataio, services
+from src import dataio, pricing, services
 
 
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
 AUCTION_LOG = f"{OUTPUT_DIR}/auction_log.csv"
 
+BASE_PROCESSED = {
+    "quotes": f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv",
+    "stats": f"{DATA_PROCESSED}/stats_master_with_weights.csv",
+    "gk": f"{DATA_PROCESSED}/goalkeepers_grid_matrix_square.csv",
+}
 REQUIRED_FILES = [
-    f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv",
-    f"{DATA_PROCESSED}/stats_master_with_weights.csv",
+    BASE_PROCESSED["quotes"],
+    BASE_PROCESSED["stats"],
     f"{DATA_PROCESSED}/derived_prices.csv",
 ]
 missing_files = [f for f in REQUIRED_FILES if not os.path.exists(f)]
 DISABLED = bool(missing_files)
+
+
+def prepare_processed_data() -> None:
+    raw_dir = Path("data/raw")
+    for out_path in BASE_PROCESSED.values():
+        out = Path(out_path)
+        if out.exists():
+            continue
+        stem = out.stem
+        src_xlsx = raw_dir / f"{stem}.xlsx"
+        src_csv = raw_dir / f"{stem}.csv"
+        if src_xlsx.exists():
+            df = pd.read_excel(src_xlsx)
+        elif src_csv.exists():
+            df = pd.read_csv(src_csv)
+        else:
+            raise FileNotFoundError(f"Missing raw file for {stem}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out, index=False)
+
+
+def train_derived_prices() -> None:
+    stats_path = Path(BASE_PROCESSED["stats"])
+    quotes_path = Path(BASE_PROCESSED["quotes"])
+    stats = dataio.load_stats(stats_path)
+    quotes = dataio.load_quotes(quotes_path)
+    derived = pricing.train_price_model(stats, quotes, "linear")
+    out_path = Path(f"{DATA_PROCESSED}/derived_prices.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    derived.to_csv(out_path, index=False)
+
+
+st.sidebar.subheader("Data Setup")
+if st.sidebar.button("Prepare processed data"):
+    try:
+        prepare_processed_data()
+        st.sidebar.success("Processed data generated")
+        st.experimental_rerun()
+    except Exception as exc:
+        st.sidebar.error(f"Failed to prepare data: {exc}")
+if st.sidebar.button("Train derived prices"):
+    try:
+        train_derived_prices()
+        st.sidebar.success("Derived prices trained")
+        st.experimental_rerun()
+    except Exception as exc:
+        st.sidebar.error(f"Failed to train prices: {exc}")
+
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
         f"- {f}" for f in missing_files
     )
-    if f"{DATA_PROCESSED}/derived_prices.csv" in missing_files:
-        message += (
-            "\nTo generate derived prices run: `python -m src.main train-prices --method linear`"
-        )
-    st.error(message)
+    st.warning(message)
 
 
 @st.cache_data
