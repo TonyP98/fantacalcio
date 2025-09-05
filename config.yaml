@@ -1,0 +1,26 @@
+seed: 42
+budget: 500
+scoring_weights:
+  gol: 3
+  assist: 1
+  amm: -0.5
+  esp: -1
+  rigore_segnato: 2
+  rigore_sbagliato: -2
+columns:
+  name: name
+  team: team
+  role: role
+  price: price
+  goals: goals
+  assists: assists
+  mins: mins
+  pens_scored: pens_scored
+  pens_missed: pens_missed
+  yc: yc
+  rc: rc
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  outputs: data/outputs
