@@ -1,32 +1,78 @@
-"""Player pricing models."""
 from __future__ import annotations
-
+import os
 from pathlib import Path
+import logging
 from typing import Dict
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge, RidgeCV
-from sqlalchemy import MetaData, create_engine, text
+from sqlalchemy import create_engine, MetaData, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-import sqlalchemy
-
-
-def _safe_reset_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Reset index avoiding conflicts when index name matches a column."""
-    idx_name = df.index.name or "index"
-    if idx_name in df.columns:
-        return df.reset_index(drop=True)
-    df = df.copy()
-    df.index.name = idx_name
-    return df.reset_index()
-
 
 FEATURE_COLS = ["goals_per90", "assists_per90", "availability"]
 
 DERIVED_CSV = Path("data/processed/derived_prices.csv")
-DB_PATH = Path("data/processed/fanta.db")
+# Allinea al path visto nello UI: data/processed/fanta.db (override via env se serve)
+DB_PATH = Path(os.getenv("FANTA_DB_PATH", "data/processed/fanta.db"))
+TABLE_NAME = "derived_prices"
+MODULE_VERSION = "pricing-2025-09-05-3"
+
+# ===== MONKEY-PATCH: reset_index() sicuro a livello GLOBALE =====
+# Impedisce il classico ValueError di pandas quando il nome dell'indice
+# coincide con una colonna già esistente (es. 'id').
+_ORIG_RESET_INDEX = pd.DataFrame.reset_index
+
+def _reset_index_safe_global(
+    self: pd.DataFrame,
+    level=None,
+    drop: bool = False,
+    inplace: bool = False,
+    col_level: int = 0,
+    col_fill: str = "",
+):
+    try:
+        if not drop:
+            idx = self.index
+            if isinstance(idx, pd.MultiIndex):
+                idx_names = list(idx.names)
+            else:
+                idx_names = [idx.name]
+            candidate_names = [n for n in idx_names if n is not None]
+            if not candidate_names:
+                candidate_names = ["index"]
+            if level is not None:
+                if isinstance(level, (list, tuple)):
+                    level_names = []
+                    for lv in level:
+                        if isinstance(idx, pd.MultiIndex):
+                            name = idx.names[lv] if isinstance(lv, int) else lv
+                        else:
+                            name = idx.name if lv in (0, None) else lv
+                        level_names.append(name if name is not None else "index")
+                    candidate_names = [n if n is not None else "index" for n in level_names]
+                else:
+                    if isinstance(idx, pd.MultiIndex):
+                        name = idx.names[level] if isinstance(level, int) else level
+                    else:
+                        name = idx.name if level in (0, None) else level
+                    candidate_names = [name if name is not None else "index"]
+            if any(name in self.columns for name in candidate_names):
+                drop = True
+    except Exception:
+        pass
+    return _ORIG_RESET_INDEX(
+        self,
+        level=level,
+        drop=drop,
+        inplace=inplace,
+        col_level=col_level,
+        col_fill=col_fill,
+    )
+
+pd.DataFrame.reset_index = _reset_index_safe_global
+# ===== FINE MONKEY-PATCH =====
 
 
 def _normalize_budget(df: pd.DataFrame, ev: np.ndarray, budget: float) -> pd.DataFrame:
@@ -76,7 +122,7 @@ def train_price_model(
     agg = (
         weighted.groupby(["id", "name", "team", "role"])[numeric_cols]
         .sum()
-        .pipe(_safe_reset_index)
+        .reset_index()
     )
     df = agg.merge(quotes, on=["id", "name", "team", "role"], how="inner")
     X = df[numeric_cols]
@@ -127,54 +173,133 @@ def build_derived_prices() -> pd.DataFrame:
     return train_price_model(stats, quotes, "linear")
 
 
-def _upsert_derived_prices(
-    df: pd.DataFrame, engine: sqlalchemy.engine.Engine, conflict_key: str = "id"
-) -> None:
-    """Upsert rows of ``df`` into ``derived_prices`` table using SQLite ON CONFLICT."""
+def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _load_builder():
+    from importlib import import_module
+
+    for mod_name in ("services", "app.services"):
+        try:
+            module = import_module(mod_name)
+        except ModuleNotFoundError:
+            continue
+        for func_name in ("build_derived_prices", "compute_derived_prices"):
+            fn = getattr(module, func_name, None)
+            if callable(fn):
+                return fn
+    raise RuntimeError(
+        "Non trovo una funzione per calcolare i derived prices. "
+        "Attesi: services.build_derived_prices() o services.compute_derived_prices()."
+    )
+
+
+def _drop_table_and_indexes(engine, table_name: str) -> None:
+    """Drop tabella e relativi indici (inclusi UNIQUE) così l'overwrite è davvero pulito."""
+    with engine.begin() as conn:
+        idx = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t"),
+            {"t": table_name},
+        ).fetchall()
+        for (idx_name,) in idx:
+            conn.execute(text(f"DROP INDEX IF EXISTS {idx_name}"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+
+def debug_schema() -> str:
+    """Ritorna DDL della tabella e indici per diagnosi veloce in UI."""
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT type,name,sql FROM sqlite_master "
+                "WHERE (name=:t) OR (type='index' AND tbl_name=:t)"
+            ),
+            {"t": TABLE_NAME},
+        ).fetchall()
+    if not rows:
+        return f"-- {TABLE_NAME} non esiste su {DB_PATH}"
+    return "\n\n".join(f"-- {t} {n}\n{sql}" for t, n, sql in rows if sql)
+
+
+def reset_derived_prices_table() -> None:
+    """API esplicita di reset per Streamlit."""
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+    _drop_table_and_indexes(engine, TABLE_NAME)
+
+
+def _upsert_df(df: pd.DataFrame, engine, table_name: str, conflict_key: str = "id") -> None:
     meta = MetaData()
     meta.reflect(bind=engine)
-    if "derived_prices" not in meta.tables:
-        df.to_sql("derived_prices", engine, if_exists="replace", index=False)
+    if table_name not in meta.tables:
+        df.to_sql(table_name, engine, if_exists="replace", index=False)
         return
-
-    table = meta.tables["derived_prices"]
+    table = meta.tables[table_name]
     cols = list(df.columns)
-    update_cols = {
-        c: getattr(sqlite_insert(table).excluded, c) for c in cols if c != conflict_key
-    }
-    records = df.to_dict(orient="records")
-
+    set_clause = {c: getattr(sqlite_insert(table).excluded, c) for c in cols if c != conflict_key}
+    rows = df.to_dict(orient="records")
     with engine.begin() as conn:
-        for row in records:
+        for row in rows:
             stmt = (
                 sqlite_insert(table)
                 .values(**row)
-                .on_conflict_do_update(index_elements=[conflict_key], set_=update_cols)
+                .on_conflict_do_update(index_elements=[conflict_key], set_=set_clause)
             )
             conn.execute(stmt)
 
 
 def train_derived_prices(overwrite: bool = False) -> pd.DataFrame:
-    """Compute derived prices and persist them to SQLite and CSV."""
-    df = build_derived_prices()
-    if df.empty:
-        raise RuntimeError("Derived prices vuoto: controlla le fasi precedenti della pipeline.")
+    builder = _load_builder()
+    try:
+        df = builder()
+    except Exception as e:
+        # Sovrapponiamo un messaggio chiaro ma lasciamo lo stack originale
+        raise RuntimeError(
+            f"Errore nel builder dei derived prices: {type(e).__name__}: {e}"
+        ) from e
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise RuntimeError("La funzione di build ha restituito un DataFrame vuoto o invalido.")
 
+    # Assicura una chiave 'id' stabile per l'UPSERT (se non già presente)
     if "id" not in df.columns:
-        key_cols = [c for c in ["player_id", "season"] if c in df.columns]
+        key_cols = [c for c in ("player_id", "season", "team_id") if c in df.columns]
         if key_cols:
             df["id"] = df[key_cols].astype(str).agg("_".join, axis=1)
+        else:
+            # fallback poco elegante ma sicuro (non deterministico tra run diversi)
+            df = df.copy()
+            df.insert(0, "id", range(1, len(df) + 1))
+
+    # Pulizia finale robusta prima del salvataggio
+    # 1) Evita nomi di colonna duplicati
+    df = df.loc[:, ~df.columns.duplicated()]
+    # 2) Deduplica eventuali id duplicati (causa comune dei conflitti logici)
+    if "id" in df.columns:
+        dups = int(df.duplicated(subset=["id"]).sum())
+        if dups:
+            logging.warning(
+                "derived_prices: trovati %d id duplicati; conservo l'ultima occorrenza.",
+                dups,
+            )
+            # Ordine di "ultima occorrenza": se esiste una colonna timestamp, usala
+            order_col = "updated_at" if "updated_at" in df.columns else None
+            if order_col:
+                df = df.sort_values(order_col)
+            df = df.drop_duplicates(subset=["id"], keep="last")
 
     engine = create_engine(f"sqlite:///{DB_PATH}")
-    with engine.begin() as conn:
-        if overwrite:
-            conn.execute(text("DELETE FROM derived_prices"))
+    # se richiesto, resetto la tabella e gli indici per un inserimento "pulito"
+    if overwrite:
+        _drop_table_and_indexes(engine, TABLE_NAME)
 
     if overwrite:
-        df.to_sql("derived_prices", engine, if_exists="append", index=False)
+        df.to_sql(TABLE_NAME, engine, if_exists="replace", index=False)
     else:
-        _upsert_derived_prices(df, engine, conflict_key="id")
+        _upsert_df(df, engine, TABLE_NAME, conflict_key="id")
 
-    DERIVED_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(DERIVED_CSV, index=False)
+    _atomic_write_csv(df, DERIVED_CSV)
     return df
