@@ -7,6 +7,7 @@ Strumento locale per analisi prezzi e performance dei calciatori in fase d'asta.
 ```bash
 python -m venv .venv
 . .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
