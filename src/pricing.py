@@ -13,6 +13,16 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 import sqlalchemy
 
 
+def _safe_reset_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Reset index avoiding conflicts when index name matches a column."""
+    idx_name = df.index.name or "index"
+    if idx_name in df.columns:
+        return df.reset_index(drop=True)
+    df = df.copy()
+    df.index.name = idx_name
+    return df.reset_index()
+
+
 FEATURE_COLS = ["goals_per90", "assists_per90", "availability"]
 
 DERIVED_CSV = Path("data/processed/derived_prices.csv")
@@ -66,7 +76,7 @@ def train_price_model(
     agg = (
         weighted.groupby(["id", "name", "team", "role"])[numeric_cols]
         .sum()
-        .reset_index()
+        .pipe(_safe_reset_index)
     )
     df = agg.merge(quotes, on=["id", "name", "team", "role"], how="inner")
     X = df[numeric_cols]
