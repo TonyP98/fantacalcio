@@ -2,6 +2,10 @@
 
 import numpy as np
 import pandas as pd
+try:  # pragma: no cover - optional dependency
+    import pulp
+except Exception:  # pragma: no cover - fallback when pulp is missing
+    pulp = None
 
 
 # --- logging shim -----------------------------------------------------------
@@ -180,99 +184,166 @@ def optimize_roster(
         )
         best_effort = True
 
-    # utilità: media fra z_role (primario) e costo (secondario dolce)
-    eta = 0.05  # penalizzazione prezzo molto lieve: regola se vuoi più parsimonia
-    def utility(row) -> float:
-        return float(row["score_z_role"]) - eta * (float(row["eff_price"]) / max(1.0, float(budget_total)))
+    # ====== ILP exact solver (preferito) ======
+    eta = 0.05   # penalizza prezzo (parca)
+    gamma = 0.002  # spinge a spendere (molto lieve)
 
-    # ciclo finché non completiamo TUTTI i ruoli richiesti
-    safety = 10000
-    while sum(need.values()) > 0 and safety > 0:
-        safety -= 1
-        # (a) costruiamo la lista dei candidati ammissibili per i ruoli ancora da riempire
-        pool["__can_role__"] = pool["role"].map(lambda r: need.get(r, 0) > 0)
-        cand = pool[pool["__can_role__"]].copy()
+    def _solve_with_ilp(
+        pool_df: pd.DataFrame,
+        need_dict: dict,
+        budget_left_f: float,
+        team_count_locked: dict,
+        team_cap_i: int,
+        budget_tot_f: float,
+    ):
+        if pulp is None:
+            return None, "pulp_not_available"
+        cand = pool_df.copy()
+        cand = cand[cand["role"].map(lambda r: need_dict.get(r, 0) > 0)]
         if cand.empty:
-            logger.error("Infeasible: no candidates left to fill remaining roles.")
-            roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
-            roster["budget_total"] = float(budget_total)
-            roster["budget_locked"] = float(budget_locked)
-            roster["budget_left"] = float(budget_left)
+            return None, "no_candidates"
+        idxs = list(cand.index)
+        x = pulp.LpVariable.dicts("x", idxs, lowBound=0, upBound=1, cat=pulp.LpBinary)
+        prob = pulp.LpProblem("roster_select", pulp.LpMaximize)
+        util = {}
+        for i in idxs:
+            z = float(cand.at[i, "score_z_role"])
+            p = float(cand.at[i, "eff_price"]) / max(1.0, budget_tot_f)
+            util[i] = z - eta * p + gamma * p
+        prob += pulp.lpSum(util[i] * x[i] for i in idxs)
+        for r, k in need_dict.items():
+            if k > 0:
+                prob += pulp.lpSum(x[i] for i in idxs if cand.at[i, "role"] == r) == int(k)
+        prob += pulp.lpSum(float(cand.at[i, "eff_price"]) * x[i] for i in idxs) <= float(budget_left_f)
+        teams = cand["team"].dropna().unique().tolist()
+        for t in teams:
+            locked_here = int(team_count_locked.get(t, 0))
+            cap_left = team_cap_i - locked_here
+            if cap_left < 0:
+                return None, f"cap_violation_locked_{t}"
+            prob += pulp.lpSum(x[i] for i in idxs if cand.at[i, "team"] == t) <= cap_left
+        try:
+            prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        except Exception as e:  # pragma: no cover - solver failures are rare
+            return None, f"solver_error:{e}"
+        if pulp.LpStatus[prob.status] != "Optimal":
+            return None, f"status_{pulp.LpStatus[prob.status]}"
+        chosen = [i for i in idxs if pulp.value(x[i]) > 0.5]
+        return cand.loc[chosen].copy(), "ok"
+
+    ilp_sel, ilp_status = (None, "skipped")
+    if not best_effort:
+        ilp_sel, ilp_status = _solve_with_ilp(
+            pool, need, budget_left, team_count, team_cap, budget_total
+        )
+
+    if ilp_sel is None:
+        if not best_effort:
+            logger.error(f"ILP infeasible/fallback ({ilp_status}). Using greedy heuristic.")
+
+        eta = 0.05  # penalizzazione prezzo molto lieve: regola se vuoi più parsimonia
+
+        def utility(row) -> float:
+            return float(row["score_z_role"]) - eta * (
+                float(row["eff_price"]) / max(1.0, float(budget_total))
+            )
+
+        safety = 10000
+        while sum(need.values()) > 0 and safety > 0:
+            safety -= 1
+            pool["__can_role__"] = pool["role"].map(lambda r: need.get(r, 0) > 0)
+            cand = pool[pool["__can_role__"]].copy()
+            if cand.empty:
+                logger.error("Infeasible: no candidates left to fill remaining roles.")
+                roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
+                roster["budget_total"] = float(budget_total)
+                roster["budget_locked"] = float(budget_locked)
+                roster["budget_left"] = float(budget_left)
+                return roster
+            cand["__u__"] = cand.apply(utility, axis=1)
+            cand = cand.sort_values(["__u__", "score_z_role"], ascending=[False, False])
+            picked = False
+            for idx, row in cand.iterrows():
+                r = row["role"]
+                price = float(row["eff_price"])
+                t = row["team"]
+                reserve = 0.0 if best_effort else reserve_budget(need, excluding_role=r)
+                if (price <= (budget_left - reserve) + 1e-9) and (
+                    team_count.get(t, 0) < team_cap
+                ):
+                    selected_rows.append(row)
+                    budget_left -= price
+                    team_count[t] = team_count.get(t, 0) + 1
+                    need[r] = int(need.get(r, 0)) - 1
+                    pool = pool.drop(index=[idx])
+                    picked = True
+                    break
+            if not picked:
+                logger.error(
+                    "Infeasible under team_cap/budget with remaining needs: " + str(need)
+                )
+                roster = pd.concat(
+                    [locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False
+                )
+                roster["budget_total"] = float(budget_total)
+                roster["budget_locked"] = float(budget_locked)
+                roster["budget_left"] = float(budget_left)
+                return roster
+
+        logger.info("All roles filled exactly with global selection.")
+        roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
+        if roster.empty:
+            logger.error("No feasible roster built. Returning empty DataFrame.")
             return roster
 
-        # (b) calcolo utilità e pre-filtro su budget con riserva
-        cand["__u__"] = cand.apply(utility, axis=1)
-        cand = cand.sort_values(["__u__", "score_z_role"], ascending=[False, False])
-
-        picked = False
-        for idx, row in cand.iterrows():
-            r = row["role"]
-            price = float(row["eff_price"])
-            t = row["team"]
-            # riserva: quanto devo tenere per completare il resto (escluso il ruolo r di questo pick)
-            reserve = reserve_budget(need, excluding_role=r)
-            if best_effort:
-                reserve = 0.0
-            # ammissibilità: budget dopo il pick deve restare >= riserva, e team_cap rispettato
-            if (price <= (budget_left - reserve) + 1e-9) and (team_count.get(t, 0) < team_cap):
-                # prendo
-                selected_rows.append(row)
-                budget_left -= price
-                team_count[t] = team_count.get(t, 0) + 1
-                need[r] = int(need.get(r, 0)) - 1
-                pool = pool.drop(index=[idx])
-                picked = True
-                break
-        if not picked:
-            # non ho trovato nessun candidato che rispetti contemporaneamente budget+riserva e team_cap
-            logger.error("Infeasible under team_cap/budget with remaining needs: " + str(need))
-            roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
-            roster["budget_total"] = float(budget_total)
-            roster["budget_locked"] = float(budget_locked)
-            roster["budget_left"] = float(budget_left)
-            return roster
-
-    # se arrivo qui ho coperto tutti i ruoli richiesti
-    logger.info("All roles filled exactly with global selection.")
-
-    roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
-    if roster.empty:
-        logger.error("No feasible roster built. Returning empty DataFrame.")
-        return roster
-
-    def upgrade_loop(roster_df: pd.DataFrame, pool_df: pd.DataFrame, budget_left: float, team_cap: int):
-        improved = True
-        while improved:
-            improved = False
-            team_counts_local = roster_df["team"].value_counts().to_dict()
-            for r in ["P", "D", "C", "A"]:
-                current = roster_df[(roster_df["role"] == r) & (roster_df["locked"] != True)]
-                if current.empty:
-                    continue
-                worst_idx = current["score_z_role"].astype(float).idxmin()
-                worst = roster_df.loc[worst_idx]
-                better = pool_df[(pool_df["role"] == r) & (pool_df["score_z_role"] > worst["score_z_role"])]
-                if better.empty:
-                    continue
-                for bidx, cand in better.sort_values(["score_z_role", "price_500"], ascending=[False, False]).iterrows():
-                    delta = float(cand["eff_price"]) - float(worst["eff_price"])
-                    if delta <= budget_left:
-                        t_old, t_new = worst["team"], cand["team"]
-                        ok_team = True
-                        if t_new != t_old:
-                            ok_team = team_counts_local.get(t_new, 0) + 1 <= team_cap
-                        if ok_team:
-                            budget_left -= max(0.0, delta)
-                            roster_df.loc[worst_idx] = cand
+        def upgrade_loop(
+            roster_df: pd.DataFrame, pool_df: pd.DataFrame, budget_left: float, team_cap: int
+        ):
+            improved = True
+            while improved:
+                improved = False
+                team_counts_local = roster_df["team"].value_counts().to_dict()
+                for r in ["P", "D", "C", "A"]:
+                    current = roster_df[(roster_df["role"] == r) & (roster_df["locked"] != True)]
+                    if current.empty:
+                        continue
+                    worst_idx = current["score_z_role"].astype(float).idxmin()
+                    worst = roster_df.loc[worst_idx]
+                    better = pool_df[
+                        (pool_df["role"] == r) & (pool_df["score_z_role"] > worst["score_z_role"])
+                    ]
+                    if better.empty:
+                        continue
+                    for bidx, cand in better.sort_values(
+                        ["score_z_role", "price_500"], ascending=[False, False]
+                    ).iterrows():
+                        delta = float(cand["eff_price"]) - float(worst["eff_price"])
+                        if delta <= budget_left:
+                            t_old, t_new = worst["team"], cand["team"]
+                            ok_team = True
                             if t_new != t_old:
-                                team_counts_local[t_new] = team_counts_local.get(t_new, 0) + 1
-                                team_counts_local[t_old] = max(0, team_counts_local.get(t_old, 0) - 1)
-                            pool_df = pool_df.drop(index=[bidx]).append(worst, ignore_index=True)
-                            improved = True
-                            break
-        return roster_df, pool_df, budget_left
+                                ok_team = team_counts_local.get(t_new, 0) + 1 <= team_cap
+                            if ok_team:
+                                budget_left -= max(0.0, delta)
+                                roster_df.loc[worst_idx] = cand
+                                if t_new != t_old:
+                                    team_counts_local[t_new] = team_counts_local.get(t_new, 0) + 1
+                                    team_counts_local[t_old] = max(
+                                        0, team_counts_local.get(t_old, 0) - 1
+                                    )
+                                pool_df = pool_df.drop(index=[bidx]).append(
+                                    worst, ignore_index=True
+                                )
+                                improved = True
+                                break
+            return roster_df, pool_df, budget_left
 
-    roster, pool, budget_left = upgrade_loop(roster, pool, budget_left, team_cap)
+        roster, pool, budget_left = upgrade_loop(roster, pool, budget_left, team_cap)
+    else:
+        roster = pd.concat([locked, ilp_sel], ignore_index=True, sort=False)
+        spent_ilp = float(ilp_sel["eff_price"].sum())
+        budget_left = max(0.0, float(budget_left) - spent_ilp)
+        logger.info("All roles filled exactly with ILP.")
 
     roster = roster.sort_values(["role", "score_z_role", "price_500"], ascending=[True, False, False]).reset_index(drop=True)
 
