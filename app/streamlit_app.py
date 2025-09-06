@@ -12,10 +12,16 @@ if ROOT not in sys.path:
 import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from src import dataio, services
-from src.db import init_db, upsert_players, engine, Player
+from src.db import (
+    init_db,
+    upsert_players,
+    mark_player_sold,
+    mark_player_unsold,
+    list_searchable_players,
+    get_player,
+)
 
 
 # init DB all'avvio
@@ -107,9 +113,20 @@ def append_log(entry: dict) -> None:
     log.to_csv(AUCTION_LOG, index=False)
 
 
-def get_player_from_db(player_id: int):
-    with Session(engine()) as s:
-        return s.get(Player, player_id)
+def add_to_my_roster(player_id: int, price: int) -> None:
+    p = get_player(player_id)
+    if p is None:
+        raise ValueError("Player not found")
+    append_log(
+        {
+            "id": p.id,
+            "name": p.name,
+            "team": p.team,
+            "role": p.role,
+            "price_paid": price,
+            "acquired": 1,
+        }
+    )
 
 
 players = load_players() if not DISABLED else pd.DataFrame()
@@ -154,33 +171,44 @@ if DISABLED:
 players["effective_price"] = players["price_500"].clip(lower=1)
 players["value_score"] = players["expected_points"] / players["effective_price"]
 
-# search bar
-name = st.selectbox("Search player", players["name"].sort_values())
-sel = players[players["name"] == name].iloc[0]
-selected_id = int(sel["id"])
+log = read_log()
 
-p = get_player_from_db(selected_id)
+st.session_state.pop("_refresh_search", None)
+
+include_sold = st.checkbox("Mostra venduti", value=False)
+search_players = list_searchable_players(include_sold=include_sold)
+name_to_id = {pl.name: pl.id for pl in search_players}
+if name_to_id:
+    name = st.selectbox("Search player", sorted(name_to_id.keys()))
+    selected_id = name_to_id.get(name)
+else:
+    name = st.selectbox("Search player", [], disabled=True)
+    selected_id = None
+
+p = get_player(int(selected_id)) if selected_id is not None else None
 
 st.subheader("Player details")
 if p is not None:
     value_score = float(p.expected_points) / max(int(p.price_500), 1)
     st.json(
         {
-            "fvm": int(p.fvm) if p.fvm is not None else 0,
+            "name": p.name,
+            "team": p.team,
+            "role": p.role,
             "price_500": int(p.price_500),
             "expected_points": float(p.expected_points),
             "value_score": round(value_score, 3),
+            "status": "SOLD" if p.is_sold else "AVAILABLE",
+            "sold_price": int(p.sold_price) if p.sold_price is not None else None,
         }
     )
 
-    log = read_log()
     state = services.RosterState(
         budget_residual=500 - pd.to_numeric(log.get("price_paid", 0)).sum(),
         team_cap=3,
-        team_counts=log[log.get("acquired", 0) == 1]["team"].value_counts().to_dict(),
+        team_counts=log["team"].value_counts().to_dict(),
         slots_needed={
-            r: services.QUOTAS[r]
-            - log[log.get("acquired", 0) == 1]["role"].value_counts().to_dict().get(r, 0)
+            r: services.QUOTAS[r] - log["role"].value_counts().to_dict().get(r, 0)
             for r in services.QUOTAS
         },
         value_threshold=players["value_score"].quantile(0.6),
@@ -202,24 +230,32 @@ if p is not None:
 else:
     st.warning("Player not found in DB.")
 
-# auction log form
 st.subheader("Auction log")
-with st.form("auction_form"):
-    price_paid = st.number_input("Price paid", min_value=0, step=1)
-    acquired = st.checkbox("Acquired", value=True)
-    submitted = st.form_submit_button("Log")
-    if submitted:
-        append_log(
-            {
-                "id": p.id if p is not None else sel["id"],
-                "name": p.name if p is not None else sel["name"],
-                "team": p.team if p is not None else sel["team"],
-                "role": p.role if p is not None else sel["role"],
-                "price_paid": int(price_paid),
-                "acquired": int(acquired),
-            }
-        )
-        st.success("Entry added to log")
+acquired = st.checkbox("Acquired", value=False)
+price_paid = st.number_input("Price paid", min_value=0, step=1)
+log_btn = st.button("Log", disabled=bool(p and p.is_sold))
+
+if log_btn and selected_id is not None:
+    ok, err = mark_player_sold(int(selected_id), int(price_paid))
+    if not ok:
+        st.error(err or "Unable to mark SOLD")
+    else:
+        try:
+            if acquired:
+                add_to_my_roster(player_id=int(selected_id), price=int(price_paid))
+        except Exception as e:
+            st.warning(f"Added SOLD, but roster add failed: {e}")
+        st.success("Player marked as SOLD.")
+        st.session_state["_refresh_search"] = True
+        st.experimental_rerun()
+
+if p and p.is_sold and st.button("Undo (rimetti disponibile)"):
+    ok, err = mark_player_unsold(p.id)
+    if ok:
+        st.success("Player reso disponibile.")
+        st.experimental_rerun()
+    else:
+        st.error(err or "Undo failed")
 
 
 st.subheader("Roster Optimizer")
@@ -243,11 +279,11 @@ if st.button("Optimize"):
     )
 
 st.sidebar.subheader("Il mio roster")
-acquired = log[log.get("acquired", 0) == 1]
-spent = pd.to_numeric(acquired.get("price_paid", 0), errors="coerce").sum()
-counts = acquired["role"].value_counts().to_dict()
+roster_df = log
+spent = pd.to_numeric(roster_df.get("price_paid", 0), errors="coerce").sum()
+counts = roster_df["role"].value_counts().to_dict()
 st.sidebar.write({"spent": spent, "budget_residual": 500 - spent, "counts": counts})
 if st.sidebar.button("Esporta il mio roster"):
-    acquired.to_csv(f"{OUTPUT_DIR}/my_roster.csv", index=False)
+    roster_df.to_csv(f"{OUTPUT_DIR}/my_roster.csv", index=False)
     st.sidebar.success("Roster esportato")
 
