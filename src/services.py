@@ -6,29 +6,6 @@ from typing import Dict
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import Engine, text
-
-
-def upsert_players(engine: Engine, df: pd.DataFrame) -> None:
-    """Upsert player records into SQLite ``players`` table.
-
-    Uses ``ON CONFLICT(id) DO UPDATE`` so rerunning imports does not
-    raise duplicate key errors.
-    """
-
-    if df.empty:
-        return
-
-    cols = list(df.columns)
-    placeholders = ", ".join(f":{c}" for c in cols)
-    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
-    stmt = text(
-        f"INSERT INTO players ({', '.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(id) DO UPDATE SET {updates}"
-    )
-    records = df.to_dict(orient="records")
-    with engine.begin() as conn:
-        conn.execute(stmt, records)
 # ---------------------------------------------------------------------------
 # Roster optimiser
 

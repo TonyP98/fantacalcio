@@ -30,6 +30,8 @@ python -m src.main rank --by value_score --role ALL --top 20 --budget 500
 
 I risultati sono salvati in `data/` e `data/outputs/`.
 
+Il database SQLite `data/fanta.db` contiene la tabella `players` ed è creato automaticamente.
+
 Il punteggio di valore è `expected_points / price_500`.
 
 ## UI
