@@ -15,12 +15,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
 from src.db import (
+    engine,
     init_db,
+    Player,
     upsert_players,
+    get_player,
     mark_player_sold,
     mark_player_unsold,
     list_searchable_players,
-    get_player,
 )
 
 
