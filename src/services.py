@@ -92,8 +92,12 @@ def optimize_roster(
         logger.error("No players provided.")
         return df
 
+    # Disponibili: NON escludere i locked anche se non "AVAILABLE"
+    is_locked = (df["my_acquired"] == 1) if "my_acquired" in df.columns else False
     if "status" in df.columns:
-        df = df[df["status"].fillna("AVAILABLE") == "AVAILABLE"].copy()
+        df = df[
+            df["status"].fillna("AVAILABLE").eq("AVAILABLE") | is_locked
+        ].copy()
 
     required = ["role", "team", "price_500", "score_z_role"]
     for col in required:
@@ -104,7 +108,7 @@ def optimize_roster(
     df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce").fillna(0)
     df = df[df["price_500"] >= 0].copy()
 
-    # Locked players already acquired
+    # Locked / già acquistati (ora df include anche eventuali non AVAILABLE ma locked)
     if "my_acquired" in df.columns:
         locked = df[df["my_acquired"] == 1].copy()
         locked["locked"] = True

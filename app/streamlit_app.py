@@ -10,10 +10,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from src import dataio, services
+from src import dataio, services, db
 from src.reco import RecConfig, compute_scores, apply_recommendation
 from src.gk_grid import GKGrid, FULLNAME_BY_CODE
 from src.db import (
@@ -369,6 +370,22 @@ st.subheader("Roster Optimizer")
 budget_total = st.number_input("Total budget", value=500)
 team_cap = st.number_input("Team cap", value=3)
 if st.button("Optimize"):
+    # 🔁 ricarica i players dal DB per includere gli ultimi acquisti
+    try:
+        db_players = db.read_players_df()[["id", "my_acquired", "my_price"]]
+        players = players.drop(columns=["my_acquired", "my_price"], errors="ignore").merge(
+            db_players, on="id", how="left"
+        )
+    except Exception:
+        pass  # fallback: usa 'players' già in memoria
+
+    # ✅ type safety: assicurati che id sia int e che le colonne esistano
+    if "id" in players.columns:
+        players["id"] = pd.to_numeric(players["id"], errors="coerce")
+    for col in ["my_acquired", "my_price"]:
+        if col not in players.columns:
+            players[col] = 0 if col == "my_acquired" else np.nan
+
     roster = services.optimize_roster(players, st, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
     cols = ["role", "name", "team", "price_500", "score_raw", "score_z_role"]

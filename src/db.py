@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 from sqlalchemy import create_engine, Integer, Float, String, DateTime, select, Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -162,6 +164,12 @@ def get_my_roster() -> list[Player]:
         return list(s.scalars(stmt))
 
 
+def read_players_df() -> pd.DataFrame:
+    """Return the players table as a pandas DataFrame."""
+    with get_engine().connect() as conn:
+        return pd.read_sql_table("players", conn)
+
+
 __all__ = [
     "engine",
     "get_engine",
@@ -174,4 +182,5 @@ __all__ = [
     "mark_player_acquired",
     "remove_from_roster",
     "get_my_roster",
+    "read_players_df",
 ]
