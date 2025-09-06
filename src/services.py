@@ -4,6 +4,51 @@ import numpy as np
 import pandas as pd
 
 
+# --- logging shim -----------------------------------------------------------
+def _mk_logger(log):
+    """Return an object exposing ``info``/``warning``/``error`` methods.
+
+    If ``log`` already implements those, it's returned untouched. Otherwise we
+    try to route messages to ``streamlit`` if available, falling back to
+    printing to stdout.
+    """
+
+    class _Shim:
+        def __init__(self, sink=None):
+            self.sink = sink
+
+        def _emit(self, level, msg):
+            try:
+                if self.sink is None:
+                    print(f"[{level.upper()}] {msg}")
+                else:
+                    fn = getattr(self.sink, level, None)
+                    if callable(fn):
+                        fn(msg)
+                    else:
+                        print(f"[{level.upper()}] {msg}")
+            except Exception:  # pragma: no cover - extremely defensive
+                print(f"[{level.upper()}] {msg}")
+
+        def info(self, msg):
+            self._emit("info", msg)
+
+        def warning(self, msg):
+            self._emit("warning", msg)
+
+        def error(self, msg):
+            self._emit("error", msg)
+
+    if hasattr(log, "info") and hasattr(log, "warning") and hasattr(log, "error"):
+        return log
+    try:  # pragma: no cover - streamlit might not be installed during tests
+        import streamlit as st
+
+        return _Shim(st)
+    except Exception:  # pragma: no cover - best effort fallback
+        return _Shim()
+
+
 def optimize_roster(
     players: pd.DataFrame,
     log,
@@ -18,8 +63,10 @@ def optimize_roster(
         Player pool. Required columns: ``role``, ``team``, ``price_500``,
         ``score_z_role``. Optional columns: ``status``, ``my_acquired``,
         ``my_price``.
-    log : Logger-like
-        Object implementing ``warning`` and ``error`` methods.
+    log : Any
+        Optional logger-like object. If missing the required methods, a simple
+        shim will be used so that ``info``, ``warning`` and ``error`` calls are
+        still handled.
     budget_total : int
         Total available budget.
     team_cap : int
@@ -35,9 +82,10 @@ def optimize_roster(
 
     roles_need = {"P": 3, "D": 8, "C": 8, "A": 6}
 
+    logger = _mk_logger(log)
     df = players.copy()
     if df.empty:
-        log.error("No players provided.")
+        logger.error("No players provided.")
         return df
 
     if "status" in df.columns:
@@ -46,7 +94,7 @@ def optimize_roster(
     required = ["role", "team", "price_500", "score_z_role"]
     for col in required:
         if col not in df.columns:
-            log.error(f"Missing required column: {col}")
+            logger.error(f"Missing required column: {col}")
             return pd.DataFrame()
 
     df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce").fillna(0)
@@ -67,7 +115,7 @@ def optimize_roster(
     budget_locked = locked["eff_price"].sum() if not locked.empty else 0.0
     budget_left = float(budget_total) - float(budget_locked)
     if budget_left < 0:
-        log.warning(
+        logger.warning(
             f"Locked players exceed budget by {-budget_left:.1f}. Proceeding best-effort with zero free budget."
         )
         budget_left = 0.0
@@ -109,11 +157,11 @@ def optimize_roster(
                 n -= 1
                 pool = pool.drop(index=[idx])
         if n > 0:
-            log.warning(f"[Best-effort] Role {r}: missing {n} due to budget/team_cap/data.")
+            logger.warning(f"[Best-effort] Role {r}: missing {n} due to budget/team_cap/data.")
 
     roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
     if roster.empty:
-        log.error("No feasible roster built. Returning empty DataFrame.")
+        logger.error("No feasible roster built. Returning empty DataFrame.")
         return roster
 
     def upgrade_loop(roster_df: pd.DataFrame, pool_df: pd.DataFrame, budget_left: float, team_cap: int):
