@@ -11,15 +11,18 @@ if ROOT not in sys.path:
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
+from src.db import init_db, upsert_players
 
+
+# init DB all'avvio
+init_db()
 
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
 AUCTION_LOG = f"{OUTPUT_DIR}/auction_log.csv"
-ENGINE = create_engine(f"sqlite:///{OUTPUT_DIR}/fanta.db")
 
 BASE_PROCESSED = {
     "quotes": f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv",
@@ -65,9 +68,11 @@ if st.sidebar.button("Reset DB"):
 if st.session_state["confirm_reset"]:
     st.sidebar.warning("This will delete the database file.")
     if st.sidebar.button("Confirm reset"):
-        db_path = Path(f"{OUTPUT_DIR}/fanta.db")
-        if db_path.exists():
-            db_path.unlink()
+        try:
+            init_db(drop=True)
+            st.sidebar.success("DB ricreato.")
+        except SQLAlchemyError as exc:
+            st.sidebar.error(str(exc))
         st.session_state["confirm_reset"] = False
         st.rerun()
 
@@ -103,9 +108,15 @@ def append_log(entry: dict) -> None:
 
 players = load_players() if not DISABLED else pd.DataFrame()
 if not players.empty:
+    df = players.copy()
+    df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce")
+    df["expected_points"] = pd.to_numeric(df.get("expected_points", 0.0), errors="coerce").fillna(0.0)
+    df = df.dropna(subset=["price_500"])
+    df["price_500"] = df["price_500"].astype(int)
+    rows = df[["id", "name", "team", "role", "fvm", "price_500", "expected_points"]].to_dict("records")
     try:
-        services.upsert_players(ENGINE, players)
-    except Exception as exc:
+        upsert_players(rows)
+    except SQLAlchemyError as exc:
         st.sidebar.error(f"Failed to upsert players: {exc}")
 st.title("Fantacalcio Roster Optimizer")
 
