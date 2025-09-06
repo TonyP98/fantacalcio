@@ -4,41 +4,43 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 
 
-# nome file atteso
 GRID_FILENAME = "goalkeepers_grid_matrix_square.csv"
+# default richiesto (file reale indicato dall'utente)
+GRID_DEFAULT = Path("data/raw") / GRID_FILENAME
 
 
-TEAM_ALIAS = {
-    "ATALANTA": "ATA",
-    "BOLOGNA": "BOL",
-    "CAGLIARI": "CAG",
-    "COMO": "COM",
-    "CREMONESE": "CRE",
-    "FIORENTINA": "FIO",
-    "GENOA": "GEN",
-    "INTER": "INT",
-    "JUVENTUS": "JUV",
-    "LAZIO": "LAZ",
-    "LECCE": "LEC",
-    "MILAN": "MIL",
-    "NAPOLI": "NAP",
-    "PARMA": "PAR",
-    "PISA": "PIS",
-    "ROMA": "ROM",
-    "SASSUOLO": "SAS",
-    "TORINO": "TOR",
-    "UDINESE": "UDI",
-    "VERONA": "VER",
+TEAM_ALIAS: Dict[str, str] = {
+    # Mappa full name e 3-letter → codici della matrice (maiuscoli):
+    "ATALANTA": "ATA", "ATA": "ATA",
+    "BOLOGNA": "BOL", "BOL": "BOL",
+    "CAGLIARI": "CAG", "CAG": "CAG",
+    "COMO": "COM", "COM": "COM",
+    "CREMONESE": "CRE", "CRE": "CRE",
+    "FIORENTINA": "FIO", "FIO": "FIO",
+    "GENOA": "GEN", "GEN": "GEN",
+    "INTER": "INT", "INT": "INT", "INTERNAZIONALE": "INT",
+    "JUVENTUS": "JUV", "JUV": "JUV",
+    "LAZIO": "LAZ", "LAZ": "LAZ",
+    "LECCE": "LEC", "LEC": "LEC",
+    "MILAN": "MIL", "MIL": "MIL",
+    "NAPOLI": "NAP", "NAP": "NAP",
+    "PARMA": "PAR", "PAR": "PAR",
+    "PISA": "PIS", "PIS": "PIS",
+    "ROMA": "ROM", "ROM": "ROM",
+    "SASSUOLO": "SAS", "SAS": "SAS",
+    "TORINO": "TOR", "TOR": "TOR",
+    "UDINESE": "UDI", "UDI": "UDI",
+    "VERONA": "VER", "VER": "VER",
 }
 
 
 def _candidate_paths() -> list[Path]:
-    """Possibili posizioni per il CSV (più robuste)."""
+    """Ordine di ricerca (preferito: data/raw/...)."""
 
     here = Path(__file__).resolve()
     src_root = here.parent  # .../src
@@ -49,19 +51,16 @@ def _candidate_paths() -> list[Path]:
     cands: list[Path] = []
     if env:
         p = Path(env)
-        cands.append(p if p.name.endswith(".csv") else p / GRID_FILENAME)
+        cands.append(p if p.suffix.lower() == ".csv" else p / GRID_FILENAME)
 
-    # Ordine: preferito = data/raw/, poi fallback legacy
     cands += [
-        # percorso corretto richiesto
-        repo_root / "data" / "raw" / GRID_FILENAME,
+        repo_root / "data" / "raw" / GRID_FILENAME,  # preferito
         cwd / "data" / "raw" / GRID_FILENAME,
         Path("data") / "raw" / GRID_FILENAME,
-        # fallback legacy/supporto
+        # fallback legacy
         repo_root / "data" / GRID_FILENAME,
         cwd / "data" / GRID_FILENAME,
         Path("data") / GRID_FILENAME,
-        repo_root / "app" / "data" / GRID_FILENAME,
     ]
 
     # dedup preservando ordine
@@ -74,6 +73,30 @@ def _candidate_paths() -> list[Path]:
     return uniq
 
 
+def _norm(s: str) -> str:
+    return str(s).strip().upper()
+
+
+def _norm_team(t: str, headers: list[str]) -> str:
+    """Restituisce un token presente negli header della matrice."""
+
+    t_up = _norm(t)
+    if t_up in headers:
+        return t_up
+    alias = TEAM_ALIAS.get(t_up, t_up)
+    if alias in headers:
+        return alias
+    if len(alias) == 3:
+        for h in headers:
+            if alias == h[:3].upper() or alias in h.upper():
+                return h.upper()
+    else:
+        for h in headers:
+            if h[:3].upper() == alias[:3].upper():
+                return h.upper()
+    return t_up
+
+
 class GKGrid:
     def __init__(self, path: Optional[str | Path] = None):
         """Se il file non esiste: available=False, nessuna eccezione."""
@@ -84,29 +107,31 @@ class GKGrid:
 
         if path:
             p = Path(path)
-            paths = [p if p.name.endswith(".csv") else p / GRID_FILENAME]
+            paths = [p if p.suffix.lower() == ".csv" else p / GRID_FILENAME]
         else:
-            paths = _candidate_paths()
+            # priorità al path default corretto
+            paths = [GRID_DEFAULT] + _candidate_paths()
 
         for candidate in paths:
             if candidate.exists():
                 df = pd.read_csv(candidate, index_col=0)
-                df.index = df.index.str.strip().str.upper()
-                df.columns = df.columns.str.strip().str.upper()
+                # normalizza header a MAIUSCOLO: 'Ata' → 'ATA'
+                df.index = df.index.map(lambda x: str(x).strip().upper())
+                df.columns = df.columns.map(lambda x: str(x).strip().upper())
                 self.df = df
                 self.available = True
                 self.resolved_path = candidate
                 break
 
-    def _norm(self, team: str) -> str:
-        t = team.strip().upper()
-        return TEAM_ALIAS.get(t, t)
-
     def score_pair(self, team_a: str, team_b: str) -> float:
+        """Valore grid tra due team (più vicino a 0 è migliore)."""
+
         if not self.available or self.df is None:
             return 0.0
-        a = self._norm(team_a)
-        b = self._norm(team_b)
+        headers_r = list(self.df.index)
+        headers_c = list(self.df.columns)
+        a = _norm_team(team_a, headers_r)
+        b = _norm_team(team_b, headers_c)
         if a in self.df.index and b in self.df.columns:
             return float(self.df.loc[a, b])
         return 0.0
@@ -116,7 +141,8 @@ class GKGrid:
 
         if not self.available or self.df is None:
             return 0.0
-        t = self._norm(team)
+        headers_r = list(self.df.index)
+        t = _norm_team(team, headers_r)
         if t in self.df.index:
             row = self.df.loc[t].astype(float).abs()
             return float(row.mean())
@@ -124,5 +150,7 @@ class GKGrid:
 
 
 def grid_signal_from_value(v: float) -> float:
+    """0 è ottimo → segnale = -|v| (più alto = meglio)."""
+
     return -abs(v)
 
