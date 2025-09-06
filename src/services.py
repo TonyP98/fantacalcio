@@ -1,147 +1,161 @@
-"""Service layer helpers for pricing and roster optimisation."""
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Dict
+"""Roster optimisation services."""
 
 import numpy as np
 import pandas as pd
 
-from . import reco
-# ---------------------------------------------------------------------------
-# Roster optimiser
-
-QUOTAS: Dict[str, int] = {"P": 3, "D": 8, "C": 8, "A": 6}
-
-
-def _initial_state(auction_log: pd.DataFrame | None) -> Dict[str, Dict[str, int]]:
-    roles = {r: 0 for r in QUOTAS}
-    teams: Dict[str, int] = {}
-    spent = 0.0
-    if auction_log is not None and not auction_log.empty:
-        acquired = auction_log[auction_log.get("acquired", 0) == 1]
-        roles.update(acquired["role"].value_counts().to_dict())
-        teams = acquired["team"].value_counts().to_dict()
-        spent = pd.to_numeric(acquired.get("price_paid", 0), errors="coerce").sum()
-    return {"roles": roles, "teams": teams, "spent": spent}
-
 
 def optimize_roster(
     players: pd.DataFrame,
-    auction_log: pd.DataFrame | None = None,
-    budget_total: float = 500,
-    team_cap: int = 3,
-    allow_low_mins: bool = False,
-    grid_matrix: pd.DataFrame | None = None,
+    log,
+    budget_total: int,
+    team_cap: int,
 ) -> pd.DataFrame:
-    """Greedy roster optimisation.
+    """Greedy roster optimiser with locked-player support and best-effort fill.
 
-    Returns a DataFrame with selected players and cumulative budget used.
+    Parameters
+    ----------
+    players : pd.DataFrame
+        Player pool. Required columns: ``role``, ``team``, ``price_500``,
+        ``score_z_role``. Optional columns: ``status``, ``my_acquired``,
+        ``my_price``.
+    log : Logger-like
+        Object implementing ``warning`` and ``error`` methods.
+    budget_total : int
+        Total available budget.
+    team_cap : int
+        Maximum number of players per real team.
+
+    Returns
+    -------
+    pd.DataFrame
+        Selected roster including locked players. Contains extra columns:
+        ``locked``, ``eff_price``, ``budget_total``, ``budget_locked`` and
+        ``budget_left``.
     """
 
-    state = _initial_state(auction_log)
-    budget_residual = budget_total - state["spent"]
+    roles_need = {"P": 3, "D": 8, "C": 8, "A": 6}
 
-    pool = players.copy()
-    if not allow_low_mins and "apps" in pool.columns:
-        pool = pool[pool["apps"] >= 8]
+    df = players.copy()
+    if df.empty:
+        log.error("No players provided.")
+        return df
 
-    # exclude already acquired players
-    if auction_log is not None and not auction_log.empty:
-        acquired_ids = auction_log[auction_log.get("acquired", 0) == 1]["id"].tolist()
-        pool = pool[~pool["id"].isin(acquired_ids)]
+    if "status" in df.columns:
+        df = df[df["status"].fillna("AVAILABLE") == "AVAILABLE"].copy()
 
-    price_500 = pd.to_numeric(pool["price_500"], errors="coerce").fillna(0)
-    pool["effective_price"] = price_500.clip(lower=1)
-    pool = reco.compute_scores(pool)
+    required = ["role", "team", "price_500", "score_z_role"]
+    for col in required:
+        if col not in df.columns:
+            log.error(f"Missing required column: {col}")
+            return pd.DataFrame()
 
-    selected = []
-    spent = 0.0
+    df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce").fillna(0)
+    df = df[df["price_500"] >= 0].copy()
 
-    for role, quota in QUOTAS.items():
-        current = state["roles"].get(role, 0)
-        needed = quota - current
-        if needed <= 0:
-            continue
+    # Locked players already acquired
+    if "my_acquired" in df.columns:
+        locked = df[df["my_acquired"] == 1].copy()
+        locked["locked"] = True
+        locked["eff_price"] = pd.to_numeric(
+            locked.get("my_price", locked["price_500"]), errors="coerce"
+        ).fillna(locked["price_500"])
+    else:
+        locked = df.iloc[0:0].copy()
+        locked["locked"] = False
+        locked["eff_price"] = []
 
-        candidates = pool[pool["role"] == role].copy()
-        candidates = candidates.sort_values(
-            ["score_z_role", "score_raw", "effective_price"],
-            ascending=[False, False, True],
+    budget_locked = locked["eff_price"].sum() if not locked.empty else 0.0
+    budget_left = float(budget_total) - float(budget_locked)
+    if budget_left < 0:
+        log.warning(
+            f"Locked players exceed budget by {-budget_left:.1f}. Proceeding best-effort with zero free budget."
         )
+        budget_left = 0.0
 
-        for _, row in candidates.iterrows():
-            if needed <= 0:
+    # Remaining needs per role
+    need = roles_need.copy()
+    if not locked.empty:
+        counts = locked["role"].value_counts().to_dict()
+        for r, cnt in counts.items():
+            if r in need:
+                need[r] = max(0, need[r] - int(cnt))
+
+    team_count = locked["team"].value_counts().to_dict() if not locked.empty else {}
+
+    # Candidate pool excluding locked players
+    pool = df.copy()
+    if "my_acquired" in pool.columns:
+        pool = pool[pool["my_acquired"] != 1].copy()
+    pool["locked"] = False
+    pool["eff_price"] = pool["price_500"]
+    pool = pool.sort_values(["role", "score_z_role", "price_500"], ascending=[True, False, False])
+
+    selected_rows = []
+
+    for r in ["P", "D", "C", "A"]:
+        n = int(need.get(r, 0))
+        if n <= 0:
+            continue
+        cand_r = pool[pool["role"] == r].copy()
+        for idx, row in cand_r.iterrows():
+            if n <= 0:
                 break
-            if spent + row["effective_price"] > budget_residual:
-                continue
-            if state["teams"].get(row["team"], 0) >= team_cap:
-                continue
+            price = float(row["eff_price"])
+            t = row["team"]
+            if price <= budget_left and team_count.get(t, 0) < team_cap:
+                selected_rows.append(row)
+                budget_left -= price
+                team_count[t] = team_count.get(t, 0) + 1
+                n -= 1
+                pool = pool.drop(index=[idx])
+        if n > 0:
+            log.warning(f"[Best-effort] Role {r}: missing {n} due to budget/team_cap/data.")
 
-            selected.append(row)
-            spent += row["effective_price"]
-            state["teams"][row["team"]] = state["teams"].get(row["team"], 0) + 1
-            needed -= 1
-
-        if needed > 0:
-            raise RuntimeError(f"Insufficient data or budget for role {role}")
-
-    roster = pd.DataFrame(selected)
+    roster = pd.concat([locked, pd.DataFrame(selected_rows)], ignore_index=True, sort=False)
     if roster.empty:
+        log.error("No feasible roster built. Returning empty DataFrame.")
         return roster
 
-    roster["cum_budget"] = roster["effective_price"].cumsum()
+    def upgrade_loop(roster_df: pd.DataFrame, pool_df: pd.DataFrame, budget_left: float, team_cap: int):
+        improved = True
+        while improved:
+            improved = False
+            team_counts_local = roster_df["team"].value_counts().to_dict()
+            for r in ["P", "D", "C", "A"]:
+                current = roster_df[(roster_df["role"] == r) & (roster_df["locked"] != True)]
+                if current.empty:
+                    continue
+                worst_idx = current["score_z_role"].astype(float).idxmin()
+                worst = roster_df.loc[worst_idx]
+                better = pool_df[(pool_df["role"] == r) & (pool_df["score_z_role"] > worst["score_z_role"])]
+                if better.empty:
+                    continue
+                for bidx, cand in better.sort_values(["score_z_role", "price_500"], ascending=[False, False]).iterrows():
+                    delta = float(cand["eff_price"]) - float(worst["eff_price"])
+                    if delta <= budget_left:
+                        t_old, t_new = worst["team"], cand["team"]
+                        ok_team = True
+                        if t_new != t_old:
+                            ok_team = team_counts_local.get(t_new, 0) + 1 <= team_cap
+                        if ok_team:
+                            budget_left -= max(0.0, delta)
+                            roster_df.loc[worst_idx] = cand
+                            if t_new != t_old:
+                                team_counts_local[t_new] = team_counts_local.get(t_new, 0) + 1
+                                team_counts_local[t_old] = max(0, team_counts_local.get(t_old, 0) - 1)
+                            pool_df = pool_df.drop(index=[bidx]).append(worst, ignore_index=True)
+                            improved = True
+                            break
+        return roster_df, pool_df, budget_left
 
-    if grid_matrix is not None:
-        gks = roster[roster["role"] == "P"]
-        if len(gks) == 3:
-            teams = gks["team"].tolist()
-            vals = []
-            for i in range(3):
-                for j in range(i + 1, 3):
-                    vals.append(grid_matrix.loc[teams[i], teams[j]])
-            avg = np.nanmean(vals)
-            roster.attrs["goalkeeper_grid_avg"] = avg
-            if avg < 8:
-                roster.attrs["goalkeeper_penalty"] = 0.5
-            else:
-                roster.attrs["goalkeeper_penalty"] = 0.0
+    roster, pool, budget_left = upgrade_loop(roster, pool, budget_left, team_cap)
 
+    roster = roster.sort_values(["role", "score_z_role", "price_500"], ascending=[True, False, False]).reset_index(drop=True)
+    roster["budget_total"] = float(budget_total)
+    roster["budget_locked"] = float(budget_locked)
+    roster["budget_left"] = float(budget_left)
     return roster
 
 
-# ---------------------------------------------------------------------------
-# Player recommendation
-
-
-@dataclass
-class RosterState:
-    """Minimal representation of current roster status."""
-
-    budget_residual: float
-    team_cap: int
-    team_counts: Dict[str, int]
-    slots_needed: Dict[str, int]
-    score_threshold: float
-
-
-def recommend_player(row: pd.Series, roster_state: RosterState) -> Dict[str, str]:
-    """Return BUY/AVOID recommendation for a player."""
-
-    team_count = roster_state.team_counts.get(row["team"], 0)
-    if team_count >= roster_state.team_cap:
-        return {"label": "AVOID", "reason": "team cap reached"}
-
-    slots_left = sum(roster_state.slots_needed.values()) or 1
-    budget_per_slot = roster_state.budget_residual / slots_left
-    if row["effective_price"] > budget_per_slot:
-        return {"label": "AVOID", "reason": "price too high"}
-
-    threshold = roster_state.score_threshold
-    if roster_state.slots_needed.get(row["role"], 0) > 0:
-        threshold *= 0.9  # slightly easier if role is needed
-
-    if row["score_z_role"] >= threshold:
-        return {"label": "BUY", "reason": "score above threshold"}
-    return {"label": "AVOID", "reason": "low value"}
+__all__ = ["optimize_roster"]
 
