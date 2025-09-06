@@ -369,7 +369,7 @@ st.subheader("Roster Optimizer")
 budget_total = st.number_input("Total budget", value=500)
 team_cap = st.number_input("Team cap", value=3)
 if st.button("Optimize"):
-    roster = services.optimize_roster(players, log, budget_total, team_cap)
+    roster = services.optimize_roster(players, st, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
     st.dataframe(
         roster[
