@@ -14,22 +14,64 @@ import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
-from src.db import (
-    engine,
-    init_db,
-    Player,
-    upsert_players,
-    mark_player_sold,
-    mark_player_unsold,
-    list_searchable_players,
-)
+from src.db import engine, init_db, Player, upsert_players
+try:
+    from src.db import list_searchable_players
+except ImportError:
+    list_searchable_players = None
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 
-# Helper locale: carica un player dal DB
+# --- Helper locali DB-bound ---
 def _load_player(player_id: int):
     with Session(engine()) as s:
         return s.get(Player, int(player_id))
+
+
+def _mark_player_sold(player_id: int, price: int | None = None):
+    with Session(engine()) as s:
+        p = s.get(Player, int(player_id))
+        if not p:
+            return False, "Player not found"
+        if p.is_sold:
+            return False, "Player already sold"
+        p.is_sold = 1
+        p.sold_price = int(price) if price is not None else None
+        p.sold_at = datetime.utcnow()
+        s.commit()
+        return True, None
+
+
+def _mark_player_unsold(player_id: int):
+    with Session(engine()) as s:
+        p = s.get(Player, int(player_id))
+        if not p:
+            return False, "Player not found"
+        p.is_sold = 0
+        p.sold_price = None
+        p.sold_at = None
+        s.commit()
+        return True, None
+
+
+# Fallback per list_searchable_players se assente nel DB
+if list_searchable_players is not None:
+    _list_players = list_searchable_players
+else:
+    def _list_players(q=None, role=None, team=None, include_sold=False):
+        with Session(engine()) as s:
+            query = s.query(Player)
+            if not include_sold:
+                query = query.filter(Player.is_sold == 0)
+            if q:
+                like = f"%{q}%"
+                query = query.filter(Player.name.like(like))
+            if role:
+                query = query.filter(Player.role == role)
+            if team:
+                query = query.filter(Player.team == team)
+            return query.order_by(Player.name.asc()).all()
 
 
 # init DB all'avvio
@@ -184,7 +226,7 @@ log = read_log()
 st.session_state.pop("_refresh_search", None)
 
 include_sold = st.checkbox("Mostra venduti", value=False)
-search_players = list_searchable_players(include_sold=include_sold)
+search_players = _list_players(include_sold=include_sold)
 name_to_id = {pl.name: pl.id for pl in search_players}
 if name_to_id:
     name = st.selectbox("Search player", sorted(name_to_id.keys()))
@@ -244,7 +286,7 @@ price_paid = st.number_input("Price paid", min_value=0, step=1)
 log_btn = st.button("Log", disabled=bool(p and p.is_sold))
 
 if log_btn and selected_id is not None:
-    ok, err = mark_player_sold(int(selected_id), int(price_paid))
+    ok, err = _mark_player_sold(int(selected_id), int(price_paid))
     if not ok:
         st.error(err or "Unable to mark SOLD")
     else:
@@ -258,7 +300,7 @@ if log_btn and selected_id is not None:
         st.experimental_rerun()
 
 if p and p.is_sold and st.button("Undo (rimetti disponibile)"):
-    ok, err = mark_player_unsold(p.id)
+    ok, err = _mark_player_unsold(p.id)
     if ok:
         st.success("Player reso disponibile.")
         st.experimental_rerun()
