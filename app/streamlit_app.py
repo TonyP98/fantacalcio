@@ -371,19 +371,10 @@ team_cap = st.number_input("Team cap", value=3)
 if st.button("Optimize"):
     roster = services.optimize_roster(players, st, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
-    st.dataframe(
-        roster[
-            [
-                "role",
-                "name",
-                "team",
-                "price_500",
-                "score_raw",
-                "score_z_role",
-                "cum_budget",
-            ]
-        ]
-    )
+    cols = ["role", "name", "team", "price_500", "score_raw", "score_z_role"]
+    if "cum_budget" in roster.columns:
+        cols.append("cum_budget")
+    st.dataframe(roster[cols])
 
 st.subheader("Il mio roster")
 

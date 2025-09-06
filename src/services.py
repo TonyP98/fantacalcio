@@ -199,6 +199,17 @@ def optimize_roster(
     roster, pool, budget_left = upgrade_loop(roster, pool, budget_left, team_cap)
 
     roster = roster.sort_values(["role", "score_z_role", "price_500"], ascending=[True, False, False]).reset_index(drop=True)
+
+    # normalizza colonne prezzo effettivo
+    if "eff_price" not in roster.columns:
+        roster["eff_price"] = roster["price_500"]
+    roster["eff_price"] = pd.to_numeric(roster["eff_price"], errors="coerce").fillna(0.0)
+
+    # cumulato di spesa riga-per-riga per la UI
+    roster["spent"] = roster["eff_price"].astype(float)
+    roster["cum_budget"] = roster["spent"].cumsum()
+
+    # metadati di budget (ripetuti su ogni riga per semplicità di export)
     roster["budget_total"] = float(budget_total)
     roster["budget_locked"] = float(budget_locked)
     roster["budget_left"] = float(budget_left)
