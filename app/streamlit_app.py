@@ -278,7 +278,15 @@ players = apply_recommendation(players, rec_cfg)
 log = read_log()
 
 include_sold = st.checkbox("Mostra venduti", value=False)
-search_players = _list_players(include_sold=include_sold)
+role_filter = st.selectbox("Ruolo", ["P", "D", "C", "A"])
+
+available_ids = [p.id for p in _list_players(role=role_filter, include_sold=False)]
+top10 = players[(players["role"].eq(role_filter)) & (players["id"].isin(available_ids))]
+top10 = top10.sort_values("score_z_role", ascending=False).head(10)
+st.caption("Top 10 disponibili per score_z_role")
+st.dataframe(top10[["name", "team", "score_z_role"]])
+
+search_players = _list_players(role=role_filter, include_sold=include_sold)
 name_to_id = {pl.name: pl.id for pl in search_players}
 if name_to_id:
     name = st.selectbox("Search player", sorted(name_to_id.keys()))
