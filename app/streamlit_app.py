@@ -19,11 +19,17 @@ from src.db import (
     init_db,
     Player,
     upsert_players,
-    get_player,
     mark_player_sold,
     mark_player_unsold,
     list_searchable_players,
 )
+from sqlalchemy.orm import Session
+
+
+# Helper locale: carica un player dal DB
+def _load_player(player_id: int):
+    with Session(engine()) as s:
+        return s.get(Player, int(player_id))
 
 
 # init DB all'avvio
@@ -116,7 +122,7 @@ def append_log(entry: dict) -> None:
 
 
 def add_to_my_roster(player_id: int, price: int) -> None:
-    p = get_player(player_id)
+    p = _load_player(player_id)
     if p is None:
         raise ValueError("Player not found")
     append_log(
@@ -187,7 +193,7 @@ else:
     name = st.selectbox("Search player", [], disabled=True)
     selected_id = None
 
-p = get_player(int(selected_id)) if selected_id is not None else None
+p = _load_player(int(selected_id)) if selected_id is not None else None
 
 st.subheader("Player details")
 if p is not None:
