@@ -44,6 +44,23 @@ def test_optimizer_handles_locked_players():
     assert roster["budget_locked"].iloc[0] == expected_locked
 
 
+def test_optimizer_dedupes_duplicate_locked_players():
+    players = _sample_players()
+    idx = players[players["role"] == "P"].index[0]
+    players.loc[idx, "my_acquired"] = 1
+    players.loc[idx, "my_price"] = 5
+    # introduce a duplicate entry for the same locked player
+    duplicate = players.loc[[idx]].copy()
+    players_dup = pd.concat([players, duplicate], ignore_index=True)
+
+    roster = services.optimize_roster(
+        players_dup, logging.getLogger("test"), budget_total=500, team_cap=10
+    )
+    locked = roster[roster["locked"] == True]
+    # the locked player should appear only once in the final roster
+    assert locked["id"].tolist().count(players.loc[idx, "id"]) == 1
+
+
 def test_optimizer_best_effort_on_low_budget():
     players = _sample_players()
     logger = logging.getLogger("test")
