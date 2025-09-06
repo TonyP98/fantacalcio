@@ -310,10 +310,11 @@ if p is not None:
         "status": "SOLD" if p.is_sold else "AVAILABLE",
         "sold_price": int(p.sold_price) if p.sold_price is not None else None,
     }
+    details["score_z_role"] = round(float(score_z), 3) if score_z is not None else None
+
     # Aggiungi Recommendation solo se non è un portiere
     if role != "P" and rec_label is not None:
         details["Recommendation"] = f"{rec_label}"
-        details["score_z_role"] = round(float(score_z), 3) if score_z is not None else None
 
     if role == "P":
         grid = GKGrid()  # default: data/raw/goalkeepers_grid_matrix_square.csv
