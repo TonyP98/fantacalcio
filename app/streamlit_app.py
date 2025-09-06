@@ -221,6 +221,33 @@ def append_log(entry: dict) -> None:
     log.to_csv(AUCTION_LOG, index=False)
 
 
+def process_log(player_id: int, price_paid: int, acquired: bool):
+    """Handle auction logging and roster updates.
+
+    Returns (ok, warning) where warning is a message when roster add failed.
+    """
+    ok, err = _mark_player_sold(int(player_id), int(price_paid))
+    if not ok:
+        return False, err
+    warn = None
+    if acquired:
+        ok2, err2 = _add_to_my_roster(int(player_id), int(price_paid))
+        if not ok2:
+            warn = err2 or "Unable to add to my roster"
+    p = _load_player(int(player_id))
+    append_log(
+        {
+            "id": p.id,
+            "name": p.name,
+            "team": p.team,
+            "role": p.role,
+            "price_paid": int(price_paid),
+            "acquired": 1 if acquired else 0,
+        }
+    )
+    return True, warn
+
+
 players = load_players() if not DISABLED else pd.DataFrame()
 if not players.empty:
     df = players.copy()
@@ -326,28 +353,12 @@ price_paid = st.number_input("Price paid", min_value=0, step=1)
 log_btn = st.button("Log", disabled=bool(p and p.is_sold))
 
 if log_btn and selected_id is not None:
-    ok, err = _mark_player_sold(int(selected_id), int(price_paid))
+    ok, warn = process_log(int(selected_id), int(price_paid), acquired)
     if not ok:
-        st.error(err or "Unable to mark SOLD")
+        st.error(warn or "Unable to mark SOLD")
     else:
-        try:
-            if acquired:
-                ok2, err2 = _add_to_my_roster(int(selected_id), int(price_paid))
-                if not ok2:
-                    st.warning(err2 or "Unable to add to my roster")
-                else:
-                    append_log(
-                        {
-                            "id": p.id,
-                            "name": p.name,
-                            "team": p.team,
-                            "role": p.role,
-                            "price_paid": int(price_paid),
-                            "acquired": 1,
-                        }
-                    )
-        except Exception as e:
-            st.warning(f"Added SOLD, but roster add failed: {e}")
+        if warn:
+            st.warning(warn)
         st.success("Player marked as SOLD.")
         st.rerun()
 
