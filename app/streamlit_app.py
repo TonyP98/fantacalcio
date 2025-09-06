@@ -14,23 +14,30 @@ import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
-from src.db import engine, init_db, Player, upsert_players
+from src.db import (
+    engine,
+    get_session,
+    init_db,
+    Player,
+    upsert_players,
+    mark_player_acquired,
+    get_my_roster,
+)
 try:
     from src.db import list_searchable_players
 except ImportError:
     list_searchable_players = None
-from sqlalchemy.orm import Session
 from datetime import datetime
 
 
 # --- Helper locali DB-bound ---
 def _load_player(player_id: int):
-    with Session(engine()) as s:
+    with get_session() as s:
         return s.get(Player, int(player_id))
 
 
 def _mark_player_sold(player_id: int, price: int | None = None):
-    with Session(engine()) as s:
+    with get_session() as s:
         p = s.get(Player, int(player_id))
         if not p:
             return False, "Player not found"
@@ -44,7 +51,7 @@ def _mark_player_sold(player_id: int, price: int | None = None):
 
 
 def _mark_player_unsold(player_id: int):
-    with Session(engine()) as s:
+    with get_session() as s:
         p = s.get(Player, int(player_id))
         if not p:
             return False, "Player not found"
@@ -58,26 +65,10 @@ def _mark_player_unsold(player_id: int):
 ROLE_ORDER = {"P": 1, "D": 2, "C": 3, "A": 4}
 
 
-def _add_to_my_roster(player_id: int, price: int | None = None):
-    if not hasattr(Player, "my_acquired"):
-        return False, "Roster tracking not supported"
-    with Session(engine()) as s:
-        p = s.get(Player, int(player_id))
-        if not p:
-            return False, "Player not found"
-        if p.my_acquired:
-            return False, "Already in my roster"
-        p.my_acquired = 1
-        p.my_price = int(price) if price is not None else None
-        p.my_acquired_at = datetime.utcnow()
-        s.commit()
-        return True, None
-
-
 def _remove_from_my_roster(player_id: int):
     if not hasattr(Player, "my_acquired"):
         return False, "Roster tracking not supported"
-    with Session(engine()) as s:
+    with get_session() as s:
         p = s.get(Player, int(player_id))
         if not p:
             return False, "Player not found"
@@ -88,20 +79,10 @@ def _remove_from_my_roster(player_id: int):
         return True, None
 
 
-def _list_my_roster():
-    if not hasattr(Player, "my_acquired"):
-        return []
-    with Session(engine()) as s:
-        q = s.query(Player).filter(Player.my_acquired == 1)
-        items = q.all()
-        items.sort(key=lambda x: (ROLE_ORDER.get(x.role, 99), x.name))
-        return items
-
-
 def _budget_stats(budget_total: int):
     if not hasattr(Player, "my_acquired"):
         return 0, int(budget_total)
-    with Session(engine()) as s:
+    with get_session() as s:
         total = (
             s.query(Player)
             .filter(Player.my_acquired == 1)
@@ -113,12 +94,22 @@ def _budget_stats(budget_total: int):
     return spent, residual
 
 
+@st.cache_data
+def _list_my_roster():
+    return get_my_roster()
+
+
+@st.cache_data
+def _budget_stats_cached(budget_total: int):
+    return _budget_stats(budget_total)
+
+
 # Fallback per list_searchable_players se assente nel DB
 if list_searchable_players is not None:
     _list_players = list_searchable_players
 else:
     def _list_players(q=None, role=None, team=None, include_sold=False):
-        with Session(engine()) as s:
+        with get_session() as s:
             query = s.query(Player)
             if not include_sold:
                 query = query.filter(Player.is_sold == 0)
@@ -231,9 +222,7 @@ def process_log(player_id: int, price_paid: int, acquired: bool):
         return False, err
     warn = None
     if acquired:
-        ok2, err2 = _add_to_my_roster(int(player_id), int(price_paid))
-        if not ok2:
-            warn = err2 or "Unable to add to my roster"
+        mark_player_acquired(int(player_id), int(price_paid))
     p = _load_player(int(player_id))
     append_log(
         {
@@ -357,10 +346,12 @@ if log_btn and selected_id is not None:
     if not ok:
         st.error(warn or "Unable to mark SOLD")
     else:
+        if acquired:
+            st.cache_data.clear()
+            st.toast("Giocatore aggiunto al roster")
         if warn:
             st.warning(warn)
-        st.success("Player marked as SOLD.")
-        st.rerun()
+        st.experimental_rerun()
 
 if p and p.is_sold and st.button("Undo (rimetti disponibile)"):
     ok, err = _mark_player_unsold(p.id)
@@ -448,7 +439,7 @@ else:
             st.success("Rimozione completata.")
             st.rerun()
 
-spent, residual = _budget_stats(int(st.session_state["budget_total"]))
+spent, residual = _budget_stats_cached(int(st.session_state["budget_total"]))
 st.metric("Speso", f"{spent}")
 st.metric("Budget residuo", f"{residual}")
 

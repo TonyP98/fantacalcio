@@ -54,3 +54,10 @@ Il roster consigliato è salvato in `data/outputs/recommended_roster.csv`.
 
 Il pannello "Il mio roster" mostra i giocatori acquistati e permette di
 esportare il roster in `data/outputs/my_roster.csv`.
+
+### Il mio roster
+
+Dal pannello "Log d'asta" è possibile spuntare **Acquired** per segnare
+un giocatore come acquistato; il giocatore viene salvato nel database
+`data/fanta.db` e appare immediatamente nella sezione "Il mio roster"
+senza bisogno di ricaricare manualmente la pagina.
