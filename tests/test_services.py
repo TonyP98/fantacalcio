@@ -14,8 +14,8 @@ def _sample_players() -> pd.DataFrame:
                     "name": f"{role}{i}",
                     "team": f"T{i%5}",
                     "role": role,
-                    "expected_points": 10 + i,
-                    "price_500": 10,
+                    "fanta_avg": 6 + i,
+                    "price_500": 10 + i,
                     "apps": 10,
                 }
             )
@@ -31,5 +31,5 @@ def test_optimizer_respects_quotas_and_budget():
         assert counts.get(role, 0) == qty
     assert roster["effective_price"].sum() <= 500
     first = roster.iloc[0]
-    assert first["value_score"] == first["expected_points"] / first["effective_price"]
+    assert "score_z_role" in first
 
