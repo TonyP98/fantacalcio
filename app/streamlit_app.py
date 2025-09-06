@@ -59,6 +59,8 @@ ROLE_ORDER = {"P": 1, "D": 2, "C": 3, "A": 4}
 
 
 def _add_to_my_roster(player_id: int, price: int | None = None):
+    if not hasattr(Player, "my_acquired"):
+        return False, "Roster tracking not supported"
     with Session(engine()) as s:
         p = s.get(Player, int(player_id))
         if not p:
@@ -73,6 +75,8 @@ def _add_to_my_roster(player_id: int, price: int | None = None):
 
 
 def _remove_from_my_roster(player_id: int):
+    if not hasattr(Player, "my_acquired"):
+        return False, "Roster tracking not supported"
     with Session(engine()) as s:
         p = s.get(Player, int(player_id))
         if not p:
@@ -85,6 +89,8 @@ def _remove_from_my_roster(player_id: int):
 
 
 def _list_my_roster():
+    if not hasattr(Player, "my_acquired"):
+        return []
     with Session(engine()) as s:
         q = s.query(Player).filter(Player.my_acquired == 1)
         items = q.all()
@@ -93,6 +99,8 @@ def _list_my_roster():
 
 
 def _budget_stats(budget_total: int):
+    if not hasattr(Player, "my_acquired"):
+        return 0, int(budget_total)
     with Session(engine()) as s:
         total = (
             s.query(Player)
