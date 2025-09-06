@@ -307,7 +307,11 @@ if p is not None:
     gk_signal = None
     owned_gk_team = None
     if role == "P":
-        grid = GKGrid()
+        grid = GKGrid()  # usa il percorso preferito data/raw/...
+        if not grid.available:
+            st.info(
+                "⚠️ GK grid non trovato in data/raw: raccomandazione portieri calcolata solo su price/fair."
+            )
         roster = get_my_roster()
         owned_gk = next((pl for pl in roster if pl.role == "P"), None)
         if owned_gk:
