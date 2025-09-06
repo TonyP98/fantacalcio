@@ -75,11 +75,14 @@ def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.D
 
     r = roster_df.copy()
 
+    # Normalizza colonne prezzo / acquired
     if "my_price" not in r.columns:
-        for c in ["price", "paid", "sold_price"]:
+        for c in ["my_price", "sold_price", "paid", "price"]:
             if c in r.columns:
                 r = r.rename(columns={c: "my_price"})
                 break
+    if "acquired" in r.columns:
+        r["acquired"] = _truthy(r["acquired"])
 
     if "id" in df.columns:
         df["id"] = pd.to_numeric(df["id"], errors="coerce")
@@ -115,13 +118,17 @@ def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.D
     else:
         r = r.drop_duplicates(subset=subset_cols, keep="last")
 
+    cols = r_key + [c for c in ["my_price", "acquired"] if c in r.columns]
     if r_key == ["id"] and "id" in df.columns:
-        m = df.merge(r[r_key + ["my_price"]], on="id", how="left")
+        m = df.merge(r[cols], on="id", how="left", indicator=True)
     else:
-        m = df.merge(r[r_key + ["my_price"]], on="__key__", how="left")
+        m = df.merge(r[cols], on="__key__", how="left", indicator=True)
         m = m.drop(columns=["__key__"])
 
-    m["my_acquired"] = m["my_price"].notna().astype(int)
+    present = m["_merge"].eq("both")
+    acquired_flag = _truthy(m["acquired"]) if "acquired" in m.columns else False
+    m["my_acquired"] = (present | acquired_flag).astype(int)
+    m = m.drop(columns=["_merge"])
     if "my_price" not in m.columns:
         m["my_price"] = np.nan
     return m
@@ -212,7 +219,11 @@ def optimize_roster(
         return df
 
     # Disponibili: NON escludere i locked anche se non "AVAILABLE"
-    is_locked = _truthy(df["my_acquired"]) if "my_acquired" in df.columns else pd.Series(False, index=df.index)
+    if "my_acquired" in df.columns:
+        df["my_acquired"] = pd.to_numeric(df["my_acquired"], errors="coerce").fillna(0).astype(int)
+        is_locked = df["my_acquired"] == 1
+    else:
+        is_locked = pd.Series(False, index=df.index)
     if "status" in df.columns:
         df = df[
             df["status"].fillna("AVAILABLE").eq("AVAILABLE") | is_locked
@@ -231,13 +242,17 @@ def optimize_roster(
     if "my_acquired" in df.columns:
         locked = df[df["my_acquired"] == 1].copy()
         locked["locked"] = True
-        locked["eff_price"] = pd.to_numeric(
-            locked.get("my_price", locked["price_500"]), errors="coerce"
-        ).fillna(locked["price_500"])
+        _mp = pd.to_numeric(locked.get("my_price"), errors="coerce")
+        locked["eff_price"] = _mp.where(_mp.notna() & (_mp > 0), locked["price_500"])
     else:
         locked = df.iloc[0:0].copy()
         locked["locked"] = False
         locked["eff_price"] = []
+    logger.info(
+        "Locked seen -> total=%d | by role=%s",
+        len(locked),
+        locked["role"].value_counts().to_dict() if not locked.empty else {},
+    )
 
     budget_locked = locked["eff_price"].sum() if not locked.empty else 0.0
     budget_left = float(budget_total) - float(budget_locked)

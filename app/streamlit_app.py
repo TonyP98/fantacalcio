@@ -377,6 +377,10 @@ if st.button("Optimize"):
         players_enriched["my_acquired"] = services._truthy(players_enriched["my_acquired"]).astype(int)
     if "my_price" in players_enriched.columns:
         players_enriched["my_price"] = pd.to_numeric(players_enriched["my_price"], errors="coerce")
+    locked_all = players_enriched.query("my_acquired==1")
+    st.caption(f"🔒 Locked che verranno inclusi: {len(locked_all)}")
+    locked_preview = locked_all[["role", "name", "team", "my_price", "price_500"]].head(5)
+    st.dataframe(locked_preview if not locked_preview.empty else pd.DataFrame([{"(none)": "—"}]))
     # 3) optimize sul DF arricchito
     roster = services.optimize_roster(players_enriched, st, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
