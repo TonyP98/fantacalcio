@@ -46,6 +46,23 @@ def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.D
 
     df = players.copy()
 
+    # Colonna ``status`` (AVAILABLE/SOLD) dal DB se non presente
+    if "status" not in df.columns:
+        df["status"] = np.nan
+    try:  # pragma: no cover - DB potrebbe non essere disponibile
+        from . import db as _db
+
+        if "id" in df.columns:
+            status_df = _db.read_players_df()[["id", "is_sold"]]
+            status_df["status_db"] = np.where(
+                status_df["is_sold"].astype(int) == 1, "SOLD", "AVAILABLE"
+            )
+            df = df.merge(status_df[["id", "status_db"]], on="id", how="left")
+            df["status"] = df.pop("status_db").combine_first(df["status"])
+    except Exception:  # pragma: no cover - best effort
+        pass
+    df["status"] = df["status"].fillna("AVAILABLE")
+
     roster_df = None
 
     # 1) database
