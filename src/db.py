@@ -127,6 +127,30 @@ def mark_player_acquired(player_id: int, price: int, when: Optional[str] = None)
         s.commit()
 
 
+def remove_from_roster(ids: list[int]) -> int:
+    """Unset acquisition fields for the given player IDs.
+
+    Returns the number of updated rows.
+    """
+    if not ids:
+        return 0
+    with get_session() as s:
+        count = (
+            s.query(Player)
+            .filter(Player.id.in_(ids))
+            .update(
+                {
+                    Player.my_acquired: 0,
+                    Player.my_price: None,
+                    Player.my_acquired_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        s.commit()
+        return count
+
+
 def get_my_roster() -> list[Player]:
     """Return list of players marked as acquired."""
     with get_session() as s:
@@ -148,5 +172,6 @@ __all__ = [
     "upsert_players",
     "list_searchable_players",
     "mark_player_acquired",
+    "remove_from_roster",
     "get_my_roster",
 ]

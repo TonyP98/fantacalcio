@@ -22,6 +22,7 @@ from src.db import (
     upsert_players,
     mark_player_acquired,
     get_my_roster,
+    remove_from_roster,
 )
 try:
     from src.db import list_searchable_players
@@ -65,20 +66,6 @@ def _mark_player_unsold(player_id: int):
 ROLE_ORDER = {"P": 1, "D": 2, "C": 3, "A": 4}
 
 
-def _remove_from_my_roster(player_id: int):
-    if not hasattr(Player, "my_acquired"):
-        return False, "Roster tracking not supported"
-    with get_session() as s:
-        p = s.get(Player, int(player_id))
-        if not p:
-            return False, "Player not found"
-        p.my_acquired = 0
-        p.my_price = None
-        p.my_acquired_at = None
-        s.commit()
-        return True, None
-
-
 def _budget_stats(budget_total: int):
     if not hasattr(Player, "my_acquired"):
         return 0, int(budget_total)
@@ -94,8 +81,8 @@ def _budget_stats(budget_total: int):
     return spent, residual
 
 
-@st.cache_data
-def _list_my_roster():
+@st.cache_data(show_spinner=False)
+def _list_my_roster(version: int):
     return get_my_roster()
 
 
@@ -125,6 +112,9 @@ else:
 
 # init DB all'avvio
 init_db()
+
+if "roster_version" not in st.session_state:
+    st.session_state["roster_version"] = 0
 
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
@@ -347,6 +337,7 @@ if log_btn and selected_id is not None:
         st.error(warn or "Unable to mark SOLD")
     else:
         if acquired:
+            st.session_state["roster_version"] += 1
             st.cache_data.clear()
             st.toast("Giocatore aggiunto al roster")
         if warn:
@@ -394,7 +385,7 @@ else:
     )
     st.session_state["budget_total"] = budget_total
 
-my_players = _list_my_roster()
+my_players = _list_my_roster(st.session_state["roster_version"])
 
 if not my_players:
     st.info("Nessun giocatore nel tuo roster.")
@@ -418,26 +409,30 @@ else:
     df_roster = df_roster.sort_values(["__k__", "Giocatore"]).drop(columns="__k__")
     st.dataframe(df_roster, use_container_width=True)
 
+    if st.button("Esporta il mio roster"):
+        output_path = Path(OUTPUT_DIR) / "my_roster.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df_roster.to_csv(output_path, index=False)
+        st.success("Roster esportato")
+
     options = [
         (p.id, f"{p.name} ({p.role} - {p.team})") for p in my_players
     ]
-    to_remove = st.multiselect(
+    selected = st.multiselect(
         "Rimuovi dal mio roster (correzione typo)",
         options=options,
         format_func=lambda x: x[1] if isinstance(x, tuple) else x,
     )
-    if st.button("Rimuovi selezionati", disabled=len(to_remove) == 0):
-        errs: list[str] = []
-        for item in to_remove:
-            pid = item[0] if isinstance(item, tuple) else int(item)
-            ok, err = _remove_from_my_roster(pid)
-            if not ok:
-                errs.append(f"{pid}: {err}")
-        if errs:
-            st.error("Alcuni elementi non sono stati rimossi:\n" + "\n".join(errs))
+    selected_ids = [item[0] if isinstance(item, tuple) else int(item) for item in selected]
+    if st.button("Rimuovi selezionati", disabled=len(selected_ids) == 0):
+        removed = remove_from_roster(selected_ids)
+        if removed != len(selected_ids):
+            st.error("Alcuni elementi non sono stati rimossi.")
         else:
             st.success("Rimozione completata.")
-            st.rerun()
+        st.session_state["roster_version"] += 1
+        st.cache_data.clear()
+        st.rerun()
 
 spent, residual = _budget_stats_cached(int(st.session_state["budget_total"]))
 st.metric("Speso", f"{spent}")
