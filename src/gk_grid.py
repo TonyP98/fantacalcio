@@ -38,6 +38,30 @@ TEAM_ALIAS: Dict[str, str] = {
     "VERONA": "VER", "VER": "VER",
 }
 
+# Mapping dai codici a 3 lettere al nome completo del club
+FULLNAME_BY_CODE: Dict[str, str] = {
+    "ATA": "ATALANTA",
+    "BOL": "BOLOGNA",
+    "CAG": "CAGLIARI",
+    "COM": "COMO",
+    "CRE": "CREMONESE",
+    "FIO": "FIORENTINA",
+    "GEN": "GENOA",
+    "INT": "INTER",
+    "JUV": "JUVENTUS",
+    "LAZ": "LAZIO",
+    "LEC": "LECCE",
+    "MIL": "MILAN",
+    "NAP": "NAPOLI",
+    "PAR": "PARMA",
+    "PIS": "PISA",
+    "ROM": "ROMA",
+    "SAS": "SASSUOLO",
+    "TOR": "TORINO",
+    "UDI": "UDINESE",
+    "VER": "VERONA",
+}
+
 
 def _candidate_paths() -> list[Path]:
     """Ordine di ricerca (preferito: data/raw/...)."""
@@ -147,6 +171,27 @@ class GKGrid:
             row = self.df.loc[t].astype(float).abs()
             return float(row.mean())
         return 0.0
+
+    def best_couples_pretty(self, team: str, top_n: int = 3) -> list[Dict[str, float]]:
+        """Top-N squadre da accoppiare con `team`, ordinate per punteggio crescente."""
+
+        if not self.available or self.df is None:
+            return []
+
+        headers = list(self.df.columns)
+        t = _norm_team(team, headers)
+        if t not in self.df.index:
+            return []
+
+        row = self.df.loc[t].astype(float).abs().sort_values()
+        out: list[Dict[str, float]] = []
+        for opp, val in row.items():
+            if opp == t:
+                continue
+            name = FULLNAME_BY_CODE.get(str(opp).strip().upper(), str(opp))
+            out.append({"team": name, "score": float(val)})
+
+        return out[:top_n]
 
 
 def grid_signal_from_value(v: float) -> float:
