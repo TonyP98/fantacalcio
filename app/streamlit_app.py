@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
 from src.reco import RecConfig, recommend_player
-from src.gk_grid import GKGrid, grid_signal_from_value
+from src.gk_grid import GKGrid, grid_signal_from_value, FULLNAME_BY_CODE
 from src.db import (
     engine,
     get_session,
@@ -305,21 +305,6 @@ if p is not None:
     role = str(getattr(p, "role", "")).upper()
     team = getattr(p, "team", None)
     gk_signal = None
-    owned_gk_team = None
-    if role == "P":
-        grid = GKGrid()  # usa il percorso preferito data/raw/...
-        if not grid.available:
-            st.info(
-                "⚠️ GK grid non trovato in data/raw: raccomandazione portieri calcolata solo su price/fair."
-            )
-        roster = get_my_roster()
-        owned_gk = next((pl for pl in roster if pl.role == "P"), None)
-        if owned_gk:
-            owned_gk_team = owned_gk.team
-            grid_val = grid.score_pair(str(owned_gk_team), str(team))
-        else:
-            grid_val = grid.single_score(str(team))
-        gk_signal = grid_signal_from_value(grid_val)
 
     rec_label, rec_score = recommend_player(
         {"id": p.id},
@@ -338,10 +323,31 @@ if p is not None:
         "price_500": int(price_500) if price_500 is not None else None,
         "status": "SOLD" if p.is_sold else "AVAILABLE",
         "sold_price": int(p.sold_price) if p.sold_price is not None else None,
-        "Recommendation": f"{rec_label}",
     }
+    # Aggiungi Recommendation solo se non è un portiere
+    if role != "P":
+        details["Recommendation"] = f"{rec_label}"
+
     if role == "P":
-        details["gk_grid_bound_to"] = owned_gk_team or "UNBOUND"
+        grid = GKGrid()  # default: data/raw/goalkeepers_grid_matrix_square.csv
+        if not grid.available:
+            st.info(
+                "⚠️ GK grid non trovato (atteso in data/raw/goalkeepers_grid_matrix_square.csv). "
+                "Puoi impostare un path custom con la variabile d'ambiente GK_GRID_PATH."
+            )
+        else:
+            best3 = grid.best_couples_pretty(str(team), top_n=3)
+            details["best_couple"] = [f"{d['team']}: {d['score']:.3f}" for d in best3]
+
+            roster = get_my_roster()
+            owned_gk = next((pl for pl in roster if str(pl.role).upper() == "P"), None)
+            if owned_gk:
+                owned_gk_team = str(getattr(owned_gk, "team", "") or "")
+                pair_score = grid.score_pair(owned_gk_team, str(team))
+                owned_name = FULLNAME_BY_CODE.get(owned_gk_team.strip().upper(), owned_gk_team)
+                cand_name = FULLNAME_BY_CODE.get(str(team).strip().upper(), str(team))
+                details["owned_pair_score"] = f"{owned_name} ↔ {cand_name}: {pair_score:.3f}"
+
     st.json(details)
 else:
     st.warning("Player not found in DB.")
