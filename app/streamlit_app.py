@@ -49,6 +49,9 @@ def prepare_processed_data() -> None:
         df.to_csv(out, index=False)
 init_db()
 
+if "confirm_reset" not in st.session_state:
+    st.session_state["confirm_reset"] = False
+
 st.sidebar.subheader("Data Setup")
 if st.sidebar.button("Prepare processed data"):
     try:
@@ -70,8 +73,14 @@ if st.sidebar.button("Prepare processed data"):
         st.sidebar.error(f"Failed to prepare data: {exc}")
 
 if st.sidebar.button("Reset DB"):
-    init_db(drop=True)
-    st.sidebar.success("DB ricreato.")
+    st.session_state["confirm_reset"] = True
+if st.session_state["confirm_reset"]:
+    st.sidebar.warning("This will drop and recreate the players table.")
+    if st.sidebar.button("Confirm reset"):
+        init_db(drop=True)
+        st.sidebar.success("DB ricreato.")
+        st.session_state["confirm_reset"] = False
+        st.rerun()
 
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
