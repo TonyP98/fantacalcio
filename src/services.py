@@ -377,7 +377,7 @@ def optimize_roster(
 
     # ====== ILP exact solver (preferito) ======
     eta = 0.0   # penalizza prezzo (parca)
-    gamma = 2.0  # spinge a spendere (molto lieve)
+    gamma = 5.0  # spinge a spendere (molto lieve)
 
     def _solve_with_ilp(
         pool_df: pd.DataFrame,
