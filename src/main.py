@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     sub.add_parser("build-features", help="Generate features")
 
     p_rank = sub.add_parser("rank", help="Rank players")
-    p_rank.add_argument("--by", default="value_score")
+    p_rank.add_argument("--by", default="score_z_role")
     p_rank.add_argument("--role", default="ALL")
     p_rank.add_argument("--top", type=int, default=10)
     p_rank.add_argument("--budget", type=float, default=0)

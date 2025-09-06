@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ```bash
 python -m src.main ingest --input examples/sample_players.csv
 python -m src.main build-features
-python -m src.main rank --by value_score --role ALL --top 20 --budget 500
+python -m src.main rank --by score_z_role --role ALL --top 20 --budget 500
 ```
 
 ## Esempio input
@@ -32,7 +32,16 @@ I risultati sono salvati in `data/` e `data/outputs/`.
 
 Il database SQLite `data/fanta.db` contiene la tabella `players` ed è creato automaticamente.
 
-Il punteggio di valore è `expected_points / price_500`.
+La metrica composita per le raccomandazioni è:
+
+```
+price_pct_role = rank_pct(price_500 | per ruolo, ascending=True)
+score_raw = 0.70 * fanta_avg + 0.30 * price_pct_role
+score_z_role = zscore(score_raw | per ruolo)
+```
+
+La label Recommendation usa le soglie configurabili `BUY alpha` e `HOLD alpha`
+sul relativo `score_z_role`.
 
 ## UI
 

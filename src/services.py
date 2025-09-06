@@ -6,6 +6,8 @@ from typing import Dict
 
 import numpy as np
 import pandas as pd
+
+from . import reco
 # ---------------------------------------------------------------------------
 # Roster optimiser
 
@@ -51,7 +53,7 @@ def optimize_roster(
 
     price_500 = pd.to_numeric(pool["price_500"], errors="coerce").fillna(0)
     pool["effective_price"] = price_500.clip(lower=1)
-    pool["value_score"] = pool["expected_points"] / pool["effective_price"]
+    pool = reco.compute_scores(pool)
 
     selected = []
     spent = 0.0
@@ -64,7 +66,7 @@ def optimize_roster(
 
         candidates = pool[pool["role"] == role].copy()
         candidates = candidates.sort_values(
-            ["value_score", "expected_points", "effective_price"],
+            ["score_z_role", "score_raw", "effective_price"],
             ascending=[False, False, True],
         )
 
@@ -120,7 +122,7 @@ class RosterState:
     team_cap: int
     team_counts: Dict[str, int]
     slots_needed: Dict[str, int]
-    value_threshold: float
+    score_threshold: float
 
 
 def recommend_player(row: pd.Series, roster_state: RosterState) -> Dict[str, str]:
@@ -135,11 +137,11 @@ def recommend_player(row: pd.Series, roster_state: RosterState) -> Dict[str, str
     if row["effective_price"] > budget_per_slot:
         return {"label": "AVOID", "reason": "price too high"}
 
-    threshold = roster_state.value_threshold
+    threshold = roster_state.score_threshold
     if roster_state.slots_needed.get(row["role"], 0) > 0:
         threshold *= 0.9  # slightly easier if role is needed
 
-    if row["value_score"] >= threshold:
-        return {"label": "BUY", "reason": "value above threshold"}
+    if row["score_z_role"] >= threshold:
+        return {"label": "BUY", "reason": "score above threshold"}
     return {"label": "AVOID", "reason": "low value"}
 

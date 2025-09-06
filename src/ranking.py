@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from . import reco
+
 
 def rank_players(
     df: pd.DataFrame,
@@ -11,14 +13,14 @@ def rank_players(
     top: int,
     budget: float,
 ) -> pd.DataFrame:
-    """Rank players by value score.
+    """Rank players by composite recommendation score.
 
     Parameters
     ----------
     df: pd.DataFrame
-        Player data containing ``price_500`` and ``expected_points``.
+        Player data containing at least ``price_500`` (and optionally ``fanta_avg``).
     by: str
-        Column to sort by (default ``value_score``).
+        Column to sort by (default ``score_z_role``).
     role: str
         Filter by role (``ALL`` for no filter).
     top: int
@@ -33,10 +35,10 @@ def rank_players(
 
     price = pd.to_numeric(data.get("price_500"), errors="coerce").fillna(0)
     data["effective_price"] = price.clip(lower=1)
-    expected = pd.to_numeric(data.get("expected_points"), errors="coerce").fillna(0)
-    data["value_score"] = expected / data["effective_price"]
 
-    sort_col = by if by in data.columns else "value_score"
+    data = reco.compute_scores(data)
+
+    sort_col = by if by in data.columns else "score_z_role"
     data = data.sort_values(sort_col, ascending=False)
     data["cum_price"] = data["effective_price"].cumsum()
     if budget:

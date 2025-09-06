@@ -14,8 +14,8 @@ import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
-from src.reco import RecConfig, recommend_player
-from src.gk_grid import GKGrid, grid_signal_from_value, FULLNAME_BY_CODE
+from src.reco import RecConfig, compute_scores, apply_recommendation
+from src.gk_grid import GKGrid, FULLNAME_BY_CODE
 from src.db import (
     engine,
     get_session,
@@ -176,16 +176,9 @@ if st.session_state["confirm_reset"]:
 
 # -- Recommendation tuning --
 st.sidebar.subheader("Tuning")
-cfg_buy_alpha = st.sidebar.number_input("BUY alpha", value=0.15, step=0.01)
-cfg_hold_alpha = st.sidebar.number_input("HOLD alpha", value=-0.05, step=0.01)
-cfg_w_price = st.sidebar.slider("GK weight price", 0.0, 1.0, 0.5)
-cfg_w_grid = st.sidebar.slider("GK weight grid", 0.0, 1.0, 0.5)
-rec_cfg = RecConfig(
-    buy_alpha=cfg_buy_alpha,
-    hold_alpha=cfg_hold_alpha,
-    w_price=cfg_w_price,
-    w_grid=cfg_w_grid,
-)
+cfg_buy_alpha = st.sidebar.number_input("BUY alpha", value=1.0, step=0.05)
+cfg_hold_alpha = st.sidebar.number_input("HOLD alpha", value=-0.05, step=0.05)
+rec_cfg = RecConfig(buy_alpha=cfg_buy_alpha, hold_alpha=cfg_hold_alpha)
 
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
@@ -198,9 +191,8 @@ if DISABLED:
 def load_players() -> pd.DataFrame:
     quotes = f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv"
     players = dataio.load_quotes(quotes)
-    # expected_points may come from separate processing; default 0
-    if "expected_points" not in players.columns:
-        players["expected_points"] = 0.0
+    stats = dataio.load_stats(BASE_PROCESSED["stats"])
+    players = players.merge(stats[["id", "fanta_avg"]], on="id", how="left")
     return players
 
 
@@ -247,15 +239,13 @@ if not players.empty:
     df = players.copy()
     df["fvm"] = pd.to_numeric(df.get("fvm"), errors="coerce")
     df["price_500"] = pd.to_numeric(df.get("price_500"), errors="coerce")
-    df["expected_points"] = pd.to_numeric(df.get("expected_points"), errors="coerce")
+    df["fanta_avg"] = pd.to_numeric(df.get("fanta_avg"), errors="coerce")
 
-    mask_missing = df["expected_points"].isna() | (df["expected_points"] <= 0)
-    df.loc[mask_missing, "expected_points"] = df.loc[mask_missing, "fvm"].fillna(0)
-
-    df = df.dropna(subset=["price_500"])
+    df = df.dropna(subset=["price_500", "fanta_avg"])
     df["price_500"] = df["price_500"].astype(int)
     df["fvm"] = df["fvm"].fillna(0).astype(int)
-    df["expected_points"] = df["expected_points"].fillna(0.0).astype(float)
+    df["fanta_avg"] = df["fanta_avg"].astype(float)
+    df["expected_points"] = 0.0
 
     rows = df[["id", "name", "team", "role", "fvm", "price_500", "expected_points"]].to_dict("records")
     try:
@@ -281,8 +271,8 @@ if DISABLED:
     st.sidebar.button("Esporta il mio roster", disabled=True)
     st.stop()
 
-players["effective_price"] = players["price_500"].clip(lower=1)
-players["value_score"] = players["expected_points"] / players["effective_price"]
+players = compute_scores(players)
+players = apply_recommendation(players, rec_cfg)
 
 log = read_log()
 
@@ -300,21 +290,16 @@ p = _load_player(int(selected_id)) if selected_id is not None else None
 
 st.subheader("Player details")
 if p is not None:
-    fair_value = getattr(p, "fvm", None) or getattr(p, "estimated_price", None)
-    price_500 = getattr(p, "price_500", None)
     role = str(getattr(p, "role", "")).upper()
     team = getattr(p, "team", None)
-    gk_signal = None
+    price_500 = getattr(p, "price_500", None)
 
-    rec_label, rec_score = recommend_player(
-        {"id": p.id},
-        fair_value=fair_value,
-        price_500=price_500,
-        role=role,
-        team=team,
-        gk_signal=gk_signal,
-        cfg=rec_cfg,
-    )
+    rec_label = None
+    score_z = None
+    row_match = players[players["id"] == p.id]
+    if not row_match.empty:
+        rec_label = row_match.iloc[0]["Recommendation"]
+        score_z = row_match.iloc[0]["score_z_role"]
 
     details = {
         "name": p.name,
@@ -325,8 +310,9 @@ if p is not None:
         "sold_price": int(p.sold_price) if p.sold_price is not None else None,
     }
     # Aggiungi Recommendation solo se non è un portiere
-    if role != "P":
+    if role != "P" and rec_label is not None:
         details["Recommendation"] = f"{rec_label}"
+        details["score_z_role"] = round(float(score_z), 3) if score_z is not None else None
 
     if role == "P":
         grid = GKGrid()  # default: data/raw/goalkeepers_grid_matrix_square.csv
@@ -391,9 +377,9 @@ if st.button("Optimize"):
                 "role",
                 "name",
                 "team",
-                "expected_points",
-                "effective_price",
-                "value_score",
+                "price_500",
+                "score_raw",
+                "score_z_role",
                 "cum_budget",
             ]
         ]
@@ -418,7 +404,10 @@ if not my_players:
 else:
     rows = []
     for p in my_players:
-        value_score = float(p.expected_points) / max(int(p.price_500), 1)
+        row_match = players[players["id"] == p.id]
+        if row_match.empty:
+            continue
+        r = row_match.iloc[0]
         rows.append(
             {
                 "Ruolo": p.role,
@@ -426,8 +415,10 @@ else:
                 "Team": p.team,
                 "Prezzo acquisto": int(p.my_price) if p.my_price is not None else 0,
                 "price_500": int(p.price_500),
-                "Expected Points": round(float(p.expected_points), 2),
-                "Value Score": round(value_score, 3),
+                "fanta_avg": round(float(r["fanta_avg"]), 2),
+                "score_raw": round(float(r["score_raw"]), 3),
+                "score_z_role": round(float(r["score_z_role"]), 3),
+                "Recommendation": r["Recommendation"],
             }
         )
     df_roster = pd.DataFrame(rows)
