@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-from sqlalchemy import create_engine, Integer, Float, String, DateTime, select
+from sqlalchemy import create_engine, Integer, Float, String, DateTime, select, Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
 
@@ -29,20 +31,45 @@ class Player(Base):
     my_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     my_acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-DB_URL = os.environ.get("FANTA_DB_URL", "sqlite:///data/fanta.db")
-_engine = create_engine(DB_URL, future=True)
+_engine: Optional["Engine"] = None
 
 
-def engine():
+def get_db_path() -> Path:
+    """Return absolute path to the SQLite DB inside the repo."""
+    return Path(__file__).resolve().parents[1] / "data" / "fanta.db"
+
+
+def get_engine():
+    """Return a singleton SQLAlchemy engine with SQLite pragmas."""
+    global _engine
+    if _engine is None:
+        db_url = os.environ.get("FANTA_DB_URL")
+        if not db_url:
+            db_url = f"sqlite:///{get_db_path()}"
+        _engine = create_engine(db_url, future=True)
+        with _engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
     return _engine
 
 
+def get_session() -> Session:
+    """Return a Session bound to the shared engine."""
+    return Session(get_engine())
+
+
+# Backwards compatibility
+def engine():
+    return get_engine()
+
+
 def init_db(drop: bool = False):
+    eng = get_engine()
     if drop:
-        Base.metadata.drop_all(bind=_engine)
-    Base.metadata.create_all(bind=_engine)
+        Base.metadata.drop_all(bind=eng)
+    Base.metadata.create_all(bind=eng)
     # Migrazione add-only per DB esistente
-    with _engine.begin() as conn:
+    with eng.begin() as conn:
         cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(players)").fetchall()}
         if "is_sold" not in cols:
             conn.exec_driver_sql("ALTER TABLE players ADD COLUMN is_sold INTEGER NOT NULL DEFAULT 0")
@@ -62,7 +89,7 @@ def upsert_players(rows: list[dict]):
     """
     rows: [{id,name,team,role,fvm,price_500,expected_points}, ...]
     """
-    with Session(_engine) as s:
+    with get_session() as s:
         for r in rows:
             s.merge(Player(**r))
         s.commit()
@@ -74,7 +101,7 @@ def list_searchable_players(
     team: str | None = None,
     include_sold: bool = False,
 ) -> list[Player]:
-    with Session(_engine) as s:
+    with get_session() as s:
         stmt = select(Player)
         if q:
             stmt = stmt.where(Player.name.like(f"%{q}%"))
@@ -87,10 +114,39 @@ def list_searchable_players(
         return list(s.scalars(stmt))
 
 
+def mark_player_acquired(player_id: int, price: int, when: Optional[str] = None) -> None:
+    """Mark player as acquired with price and timestamp."""
+    when_dt = datetime.fromisoformat(when) if when else datetime.utcnow()
+    with get_session() as s:
+        p = s.get(Player, int(player_id))
+        if not p:
+            return
+        p.my_acquired = 1
+        p.my_price = int(price)
+        p.my_acquired_at = when_dt
+        s.commit()
+
+
+def get_my_roster() -> list[Player]:
+    """Return list of players marked as acquired."""
+    with get_session() as s:
+        stmt = (
+            select(Player)
+            .where(Player.my_acquired == 1)
+            .order_by(Player.role, Player.team, Player.name)
+        )
+        return list(s.scalars(stmt))
+
+
 __all__ = [
     "engine",
+    "get_engine",
+    "get_session",
+    "get_db_path",
     "init_db",
     "Player",
     "upsert_players",
     "list_searchable_players",
+    "mark_player_acquired",
+    "get_my_roster",
 ]
