@@ -11,3 +11,4 @@ def test_build_features_per90():
     expected = 15 / (2800 / 90)
     assert pytest.approx(first["goals_per90"], 0.01) == expected
     assert 0 <= first["availability"] <= 1
+    assert first["expected_points"] == df.iloc[0]["goals"] + df.iloc[0]["assists"]
