@@ -223,8 +223,6 @@ players["value_score"] = players["expected_points"] / players["effective_price"]
 
 log = read_log()
 
-st.session_state.pop("_refresh_search", None)
-
 include_sold = st.checkbox("Mostra venduti", value=False)
 search_players = _list_players(include_sold=include_sold)
 name_to_id = {pl.name: pl.id for pl in search_players}
@@ -296,14 +294,13 @@ if log_btn and selected_id is not None:
         except Exception as e:
             st.warning(f"Added SOLD, but roster add failed: {e}")
         st.success("Player marked as SOLD.")
-        st.session_state["_refresh_search"] = True
-        st.experimental_rerun()
+        st.rerun()
 
 if p and p.is_sold and st.button("Undo (rimetti disponibile)"):
     ok, err = _mark_player_unsold(p.id)
     if ok:
         st.success("Player reso disponibile.")
-        st.experimental_rerun()
+        st.rerun()
     else:
         st.error(err or "Undo failed")
 
