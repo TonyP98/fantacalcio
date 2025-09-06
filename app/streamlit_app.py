@@ -351,7 +351,7 @@ if log_btn and selected_id is not None:
             st.toast("Giocatore aggiunto al roster")
         if warn:
             st.warning(warn)
-        st.experimental_rerun()
+        st.rerun()
 
 if p and p.is_sold and st.button("Undo (rimetti disponibile)"):
     ok, err = _mark_player_unsold(p.id)
