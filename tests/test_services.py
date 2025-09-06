@@ -1,4 +1,6 @@
 import logging
+import os
+from importlib import reload
 import pandas as pd
 
 from src import services
@@ -87,4 +89,42 @@ def test_attach_my_roster_from_session_state():
     enriched = services.attach_my_roster(players, st)
     assert list(enriched["my_acquired"]) == [1, 0]
     assert enriched.loc[0, "my_price"] == 20
+
+
+def test_attach_my_roster_from_db(monkeypatch):
+    os.environ["FANTA_DB_URL"] = "sqlite:///:memory:"
+    from src import db as _db
+
+    reload(_db)
+    _db.init_db()
+    _db.upsert_players(
+        [
+            {
+                "id": 1,
+                "name": "A",
+                "team": "T1",
+                "role": "P",
+                "fvm": 0,
+                "price_500": 5,
+                "expected_points": 0.0,
+            },
+            {
+                "id": 2,
+                "name": "B",
+                "team": "T2",
+                "role": "D",
+                "fvm": 0,
+                "price_500": 6,
+                "expected_points": 0.0,
+            },
+        ]
+    )
+    _db.mark_player_acquired(2, 11)
+
+    players = pd.DataFrame(
+        {"id": [1, 2], "name": ["A", "B"], "team": ["T1", "T2"]}
+    )
+    enriched = services.attach_my_roster(players)
+    assert list(enriched["my_acquired"]) == [0, 1]
+    assert enriched.loc[1, "my_price"] == 11
 

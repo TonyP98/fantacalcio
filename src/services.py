@@ -33,9 +33,10 @@ def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.D
     Le informazioni sugli acquisti vengono lette da una delle seguenti sorgenti,
     in ordine di priorità:
 
-    1. CSV ``my_roster.csv`` in :data:`OUTPUT_DIR` o in ``data/outputs``.
-    2. ``st.session_state.my_roster`` se disponibile.
-    3. ``st.session_state.auction_log`` filtrato per ``acquired == true``.
+    1. Database SQLite tramite :func:`src.db.get_my_roster`.
+    2. CSV ``my_roster.csv`` in :data:`OUTPUT_DIR` o in ``data/outputs``.
+    3. ``st.session_state.my_roster`` se disponibile.
+    4. ``st.session_state.auction_log`` filtrato per ``acquired == true``.
 
     L'unione avviene sulla colonna ``id`` se presente, altrimenti sul
     combinato ``name`` + ``team``. In assenza di una sorgente valida viene
@@ -46,18 +47,40 @@ def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.D
     df = players.copy()
 
     roster_df = None
-    for path in [
-        os.path.join(OUTPUT_DIR, "my_roster.csv"),
-        os.path.join("data", "outputs", "my_roster.csv"),
-        os.path.join("data", "my_roster.csv"),
-    ]:
-        if os.path.exists(path):
-            try:
-                roster_df = pd.read_csv(path)
-                break
-            except Exception:
-                pass
 
+    # 1) database
+    try:
+        from . import db as _db
+
+        roster_players = _db.get_my_roster()
+        if roster_players:
+            roster_df = pd.DataFrame(
+                {
+                    "id": [p.id for p in roster_players],
+                    "name": [p.name for p in roster_players],
+                    "team": [p.team for p in roster_players],
+                    "my_price": [p.my_price for p in roster_players],
+                    "acquired": [1] * len(roster_players),
+                }
+            )
+    except Exception:
+        roster_df = None
+
+    # 2) CSV su disco
+    if roster_df is None:
+        for path in [
+            os.path.join(OUTPUT_DIR, "my_roster.csv"),
+            os.path.join("data", "outputs", "my_roster.csv"),
+            os.path.join("data", "my_roster.csv"),
+        ]:
+            if os.path.exists(path):
+                try:
+                    roster_df = pd.read_csv(path)
+                    break
+                except Exception:
+                    pass
+
+    # 3) session_state
     if roster_df is None and st is not None and hasattr(st, "session_state"):
         if "my_roster" in st.session_state:
             roster_df = pd.DataFrame(st.session_state["my_roster"])
