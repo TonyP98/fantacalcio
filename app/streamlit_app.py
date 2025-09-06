@@ -14,6 +14,8 @@ import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import dataio, services
+from src.reco import RecConfig, recommend_player
+from src.gk_grid import GKGrid, grid_signal_from_value
 from src.db import (
     engine,
     get_session,
@@ -172,6 +174,19 @@ if st.session_state["confirm_reset"]:
         st.session_state["confirm_reset"] = False
         st.rerun()
 
+# -- Recommendation tuning --
+st.sidebar.subheader("Tuning")
+cfg_buy_alpha = st.sidebar.number_input("BUY alpha", value=0.15, step=0.01)
+cfg_hold_alpha = st.sidebar.number_input("HOLD alpha", value=-0.05, step=0.01)
+cfg_w_price = st.sidebar.slider("GK weight price", 0.0, 1.0, 0.5)
+cfg_w_grid = st.sidebar.slider("GK weight grid", 0.0, 1.0, 0.5)
+rec_cfg = RecConfig(
+    buy_alpha=cfg_buy_alpha,
+    hold_alpha=cfg_hold_alpha,
+    w_price=cfg_w_price,
+    w_grid=cfg_w_grid,
+)
+
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
         f"- {f}" for f in missing_files
@@ -285,44 +300,45 @@ p = _load_player(int(selected_id)) if selected_id is not None else None
 
 st.subheader("Player details")
 if p is not None:
-    value_score = float(p.expected_points) / max(int(p.price_500), 1)
-    st.json(
-        {
-            "name": p.name,
-            "team": p.team,
-            "role": p.role,
-            "price_500": int(p.price_500),
-            "expected_points": float(p.expected_points),
-            "value_score": round(value_score, 3),
-            "status": "SOLD" if p.is_sold else "AVAILABLE",
-            "sold_price": int(p.sold_price) if p.sold_price is not None else None,
-        }
+    fair_value = getattr(p, "fvm", None) or getattr(p, "estimated_price", None)
+    price_500 = getattr(p, "price_500", None)
+    role = str(getattr(p, "role", "")).upper()
+    team = getattr(p, "team", None)
+    gk_signal = None
+    owned_gk_team = None
+    if role == "P":
+        grid = GKGrid()
+        roster = get_my_roster()
+        owned_gk = next((pl for pl in roster if pl.role == "P"), None)
+        if owned_gk:
+            owned_gk_team = owned_gk.team
+            grid_val = grid.score_pair(str(owned_gk_team), str(team))
+        else:
+            grid_val = grid.single_score(str(team))
+        gk_signal = grid_signal_from_value(grid_val)
+
+    rec_label, rec_score = recommend_player(
+        {"id": p.id},
+        fair_value=fair_value,
+        price_500=price_500,
+        role=role,
+        team=team,
+        gk_signal=gk_signal,
+        cfg=rec_cfg,
     )
 
-    state = services.RosterState(
-        budget_residual=500 - pd.to_numeric(log.get("price_paid", 0)).sum(),
-        team_cap=3,
-        team_counts=log["team"].value_counts().to_dict(),
-        slots_needed={
-            r: services.QUOTAS[r] - log["role"].value_counts().to_dict().get(r, 0)
-            for r in services.QUOTAS
-        },
-        value_threshold=players["value_score"].quantile(0.6),
-    )
-
-    sel_row = pd.Series(
-        {
-            "id": p.id,
-            "name": p.name,
-            "team": p.team,
-            "role": p.role,
-            "expected_points": float(p.expected_points),
-            "effective_price": max(int(p.price_500), 1),
-            "value_score": value_score,
-        }
-    )
-    rec = services.recommend_player(sel_row, state)
-    st.markdown(f"**Recommendation:** {rec['label']} - {rec['reason']}")
+    details = {
+        "name": p.name,
+        "team": team,
+        "role": role,
+        "price_500": int(price_500) if price_500 is not None else None,
+        "status": "SOLD" if p.is_sold else "AVAILABLE",
+        "sold_price": int(p.sold_price) if p.sold_price is not None else None,
+        "Recommendation": f"{rec_label}",
+    }
+    if role == "P":
+        details["gk_grid_bound_to"] = owned_gk_team or "UNBOUND"
+    st.json(details)
 else:
     st.warning("Player not found in DB.")
 
