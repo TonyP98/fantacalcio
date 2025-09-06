@@ -55,6 +55,56 @@ def _mark_player_unsold(player_id: int):
         return True, None
 
 
+ROLE_ORDER = {"P": 1, "D": 2, "C": 3, "A": 4}
+
+
+def _add_to_my_roster(player_id: int, price: int | None = None):
+    with Session(engine()) as s:
+        p = s.get(Player, int(player_id))
+        if not p:
+            return False, "Player not found"
+        if p.my_acquired:
+            return False, "Already in my roster"
+        p.my_acquired = 1
+        p.my_price = int(price) if price is not None else None
+        p.my_acquired_at = datetime.utcnow()
+        s.commit()
+        return True, None
+
+
+def _remove_from_my_roster(player_id: int):
+    with Session(engine()) as s:
+        p = s.get(Player, int(player_id))
+        if not p:
+            return False, "Player not found"
+        p.my_acquired = 0
+        p.my_price = None
+        p.my_acquired_at = None
+        s.commit()
+        return True, None
+
+
+def _list_my_roster():
+    with Session(engine()) as s:
+        q = s.query(Player).filter(Player.my_acquired == 1)
+        items = q.all()
+        items.sort(key=lambda x: (ROLE_ORDER.get(x.role, 99), x.name))
+        return items
+
+
+def _budget_stats(budget_total: int):
+    with Session(engine()) as s:
+        total = (
+            s.query(Player)
+            .filter(Player.my_acquired == 1)
+            .with_entities(Player.my_price)
+            .all()
+        )
+    spent = sum(int(p[0]) for p in total if p[0] is not None)
+    residual = int(budget_total) - spent
+    return spent, residual
+
+
 # Fallback per list_searchable_players se assente nel DB
 if list_searchable_players is not None:
     _list_players = list_searchable_players
@@ -161,22 +211,6 @@ def append_log(entry: dict) -> None:
     log = read_log()
     log = pd.concat([log, pd.DataFrame([entry])], ignore_index=True)
     log.to_csv(AUCTION_LOG, index=False)
-
-
-def add_to_my_roster(player_id: int, price: int) -> None:
-    p = _load_player(player_id)
-    if p is None:
-        raise ValueError("Player not found")
-    append_log(
-        {
-            "id": p.id,
-            "name": p.name,
-            "team": p.team,
-            "role": p.role,
-            "price_paid": price,
-            "acquired": 1,
-        }
-    )
 
 
 players = load_players() if not DISABLED else pd.DataFrame()
@@ -290,7 +324,20 @@ if log_btn and selected_id is not None:
     else:
         try:
             if acquired:
-                add_to_my_roster(player_id=int(selected_id), price=int(price_paid))
+                ok2, err2 = _add_to_my_roster(int(selected_id), int(price_paid))
+                if not ok2:
+                    st.warning(err2 or "Unable to add to my roster")
+                else:
+                    append_log(
+                        {
+                            "id": p.id,
+                            "name": p.name,
+                            "team": p.team,
+                            "role": p.role,
+                            "price_paid": int(price_paid),
+                            "acquired": 1,
+                        }
+                    )
         except Exception as e:
             st.warning(f"Added SOLD, but roster add failed: {e}")
         st.success("Player marked as SOLD.")
@@ -325,12 +372,64 @@ if st.button("Optimize"):
         ]
     )
 
-st.sidebar.subheader("Il mio roster")
-roster_df = log
-spent = pd.to_numeric(roster_df.get("price_paid", 0), errors="coerce").sum()
-counts = roster_df["role"].value_counts().to_dict()
-st.sidebar.write({"spent": spent, "budget_residual": 500 - spent, "counts": counts})
-if st.sidebar.button("Esporta il mio roster"):
-    roster_df.to_csv(f"{OUTPUT_DIR}/my_roster.csv", index=False)
-    st.sidebar.success("Roster esportato")
+st.subheader("Il mio roster")
+
+budget_total = st.session_state.get("budget_total")
+if budget_total is None:
+    budget_total = st.number_input("Budget totale", min_value=0, value=500, step=1)
+    st.session_state["budget_total"] = budget_total
+else:
+    budget_total = st.number_input(
+        "Budget totale", min_value=0, value=int(budget_total), step=1
+    )
+    st.session_state["budget_total"] = budget_total
+
+my_players = _list_my_roster()
+
+if not my_players:
+    st.info("Nessun giocatore nel tuo roster.")
+else:
+    rows = []
+    for p in my_players:
+        value_score = float(p.expected_points) / max(int(p.price_500), 1)
+        rows.append(
+            {
+                "Ruolo": p.role,
+                "Giocatore": p.name,
+                "Team": p.team,
+                "Prezzo acquisto": int(p.my_price) if p.my_price is not None else 0,
+                "price_500": int(p.price_500),
+                "Expected Points": round(float(p.expected_points), 2),
+                "Value Score": round(value_score, 3),
+            }
+        )
+    df_roster = pd.DataFrame(rows)
+    df_roster["__k__"] = df_roster["Ruolo"].map(lambda r: ROLE_ORDER.get(r, 99))
+    df_roster = df_roster.sort_values(["__k__", "Giocatore"]).drop(columns="__k__")
+    st.dataframe(df_roster, use_container_width=True)
+
+    options = [
+        (p.id, f"{p.name} ({p.role} - {p.team})") for p in my_players
+    ]
+    to_remove = st.multiselect(
+        "Rimuovi dal mio roster (correzione typo)",
+        options=options,
+        format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+    )
+    if st.button("Rimuovi selezionati", disabled=len(to_remove) == 0):
+        errs: list[str] = []
+        for item in to_remove:
+            pid = item[0] if isinstance(item, tuple) else int(item)
+            ok, err = _remove_from_my_roster(pid)
+            if not ok:
+                errs.append(f"{pid}: {err}")
+        if errs:
+            st.error("Alcuni elementi non sono stati rimossi:\n" + "\n".join(errs))
+        else:
+            st.success("Rimozione completata.")
+            st.rerun()
+
+spent, residual = _budget_stats(int(st.session_state["budget_total"]))
+st.metric("Speso", f"{spent}")
+st.metric("Budget residuo", f"{residual}")
 

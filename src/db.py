@@ -24,6 +24,10 @@ class Player(Base):
     is_sold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     sold_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Tracking acquisti personali
+    my_acquired: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    my_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    my_acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 DB_URL = os.environ.get("FANTA_DB_URL", "sqlite:///data/fanta.db")
 _engine = create_engine(DB_URL, future=True)
@@ -46,6 +50,12 @@ def init_db(drop: bool = False):
             conn.exec_driver_sql("ALTER TABLE players ADD COLUMN sold_price INTEGER")
         if "sold_at" not in cols:
             conn.exec_driver_sql("ALTER TABLE players ADD COLUMN sold_at TEXT")
+        if "my_acquired" not in cols:
+            conn.exec_driver_sql("ALTER TABLE players ADD COLUMN my_acquired INTEGER NOT NULL DEFAULT 0")
+        if "my_price" not in cols:
+            conn.exec_driver_sql("ALTER TABLE players ADD COLUMN my_price INTEGER")
+        if "my_acquired_at" not in cols:
+            conn.exec_driver_sql("ALTER TABLE players ADD COLUMN my_acquired_at TEXT")
 
 
 def upsert_players(rows: list[dict]):
