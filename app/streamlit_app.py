@@ -11,26 +11,21 @@ if ROOT not in sys.path:
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
 
-from src import dataio, pricing, services
+from src import dataio, services
+from src.db import init_db, upsert_players
 
 
 DATA_PROCESSED = "data/processed"
 OUTPUT_DIR = "data/outputs"
 AUCTION_LOG = f"{OUTPUT_DIR}/auction_log.csv"
-ENGINE = create_engine(f"sqlite:///{OUTPUT_DIR}/fanta.db")
 
 BASE_PROCESSED = {
     "quotes": f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv",
     "stats": f"{DATA_PROCESSED}/stats_master_with_weights.csv",
     "gk": f"{DATA_PROCESSED}/goalkeepers_grid_matrix_square.csv",
 }
-REQUIRED_FILES = [
-    BASE_PROCESSED["quotes"],
-    BASE_PROCESSED["stats"],
-    f"{DATA_PROCESSED}/derived_prices.csv",
-]
+REQUIRED_FILES = [BASE_PROCESSED["quotes"], BASE_PROCESSED["stats"]]
 missing_files = [f for f in REQUIRED_FILES if not os.path.exists(f)]
 DISABLED = bool(missing_files)
 
@@ -52,54 +47,31 @@ def prepare_processed_data() -> None:
             raise FileNotFoundError(f"Missing raw file for {stem}")
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out, index=False)
-
-
-def train_derived_prices() -> pd.DataFrame:
-    stats_path = Path(BASE_PROCESSED["stats"])
-    quotes_path = Path(BASE_PROCESSED["quotes"])
-    stats = dataio.load_stats(stats_path)
-    quotes = dataio.load_quotes(quotes_path)
-    derived_df = pricing.train_price_model(stats, quotes, "linear")
-    out_path = Path(f"{DATA_PROCESSED}/derived_prices.csv")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    derived_df.to_csv(out_path, index=False)
-    try:
-        derived_df.to_sql("derived_prices", ENGINE, if_exists="replace", index=False)
-    except Exception as exc:
-        st.error(f"Failed to persist derived prices: {exc}")
-    return derived_df
-
+init_db()
 
 st.sidebar.subheader("Data Setup")
 if st.sidebar.button("Prepare processed data"):
     try:
         prepare_processed_data()
+        players = load_players()
+        players["price_500"] = pd.to_numeric(players["price_500"], errors="coerce")
+        players["expected_points"] = pd.to_numeric(
+            players.get("expected_points", 0), errors="coerce"
+        ).fillna(0.0)
+        players = players.dropna(subset=["price_500"])
+        players["price_500"] = players["price_500"].astype(int)
+        rows = players[
+            ["id", "name", "team", "role", "fvm", "price_500", "expected_points"]
+        ].to_dict(orient="records")
+        upsert_players(rows)
         st.sidebar.success("Processed data generated")
         st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Failed to prepare data: {exc}")
-if st.sidebar.button("Train derived prices"):
-    try:
-        train_derived_prices()
-    except Exception as exc:
-        st.sidebar.error(f"Failed to train prices: {exc}")
-    else:
-        st.sidebar.success("Derived prices trained")
-        st.rerun()
-
-if "confirm_reset" not in st.session_state:
-    st.session_state["confirm_reset"] = False
 
 if st.sidebar.button("Reset DB"):
-    st.session_state["confirm_reset"] = True
-if st.session_state["confirm_reset"]:
-    st.sidebar.warning("This will delete the database file.")
-    if st.sidebar.button("Confirm reset"):
-        db_path = Path(f"{OUTPUT_DIR}/fanta.db")
-        if db_path.exists():
-            db_path.unlink()
-        st.session_state["confirm_reset"] = False
-        st.rerun()
+    init_db(drop=True)
+    st.sidebar.success("DB ricreato.")
 
 if DISABLED:
     message = "Missing required data files:\n" + "\n".join(
@@ -111,8 +83,7 @@ if DISABLED:
 @st.cache_data
 def load_players() -> pd.DataFrame:
     quotes = f"{DATA_PROCESSED}/quotes_2025_26_FVM_budget500.csv"
-    derived = f"{DATA_PROCESSED}/derived_prices.csv"
-    players = dataio.load_quotes(quotes, derived)
+    players = dataio.load_quotes(quotes)
     # expected_points may come from separate processing; default 0
     if "expected_points" not in players.columns:
         players["expected_points"] = 0.0
@@ -134,17 +105,13 @@ def append_log(entry: dict) -> None:
 
 players = load_players() if not DISABLED else pd.DataFrame()
 if not players.empty:
-    try:
-        services.upsert_players(ENGINE, players)
-    except Exception as exc:
-        st.sidebar.error(f"Failed to upsert players: {exc}")
+    players["price_500"] = pd.to_numeric(players["price_500"], errors="coerce")
+    players["expected_points"] = pd.to_numeric(
+        players.get("expected_points", 0), errors="coerce"
+    ).fillna(0.0)
+    players = players.dropna(subset=["price_500"])
+    players["price_500"] = players["price_500"].astype(int)
 st.title("Fantacalcio Roster Optimizer")
-
-# price strategy controls
-strategy = st.selectbox(
-    "Price strategy", ["estimated", "fvm500", "blend"], index=0, disabled=DISABLED
-)
-alpha = st.slider("Blend alpha", 0.0, 1.0, 0.6, disabled=DISABLED)
 
 if DISABLED:
     st.selectbox("Search player", [], disabled=True)
@@ -162,7 +129,7 @@ if DISABLED:
     st.sidebar.button("Esporta il mio roster", disabled=True)
     st.stop()
 
-players["effective_price"] = services.choose_price(players, strategy, alpha)
+players["effective_price"] = pd.to_numeric(players["price_500"], errors="coerce").clip(lower=1)
 players["value_score"] = players["expected_points"] / players["effective_price"]
 
 # search bar
@@ -174,7 +141,6 @@ st.write(
     {
         "fvm": sel.get("fvm"),
         "price_500": sel.get("price_500"),
-        "estimated_price": sel.get("estimated_price"),
         "expected_points": sel.get("expected_points"),
         "value_score": sel.get("value_score"),
     }
@@ -216,9 +182,7 @@ st.subheader("Roster Optimizer")
 budget_total = st.number_input("Total budget", value=500)
 team_cap = st.number_input("Team cap", value=3)
 if st.button("Optimize"):
-    roster = services.optimize_roster(
-        players, log, budget_total, team_cap, strategy, alpha
-    )
+    roster = services.optimize_roster(players, log, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
     st.dataframe(
         roster[

@@ -11,7 +11,7 @@ columns:
   name: name
   team: team
   role: role
-  price: price
+  price_500: price
   goals: goals
   assists: assists
   mins: mins

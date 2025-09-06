@@ -9,7 +9,7 @@ import pandas as pd
 
 
 NUMERIC_COLS = [
-    "price",
+    "price_500",
     "goals",
     "assists",
     "mins",
@@ -42,40 +42,30 @@ def load_parquet(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def load_quotes(quotes_path: str, derived_path: str | None = None) -> pd.DataFrame:
-    """Load quotes and optional derived prices.
+def load_quotes(quotes_path: str) -> pd.DataFrame:
+    """Load official price quotes.
 
     Parameters
     ----------
     quotes_path:
         Path to ``quotes_2025_26_FVM_budget500.csv``.
-    derived_path:
-        Optional path to ``derived_prices.csv`` containing ``estimated_price``.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns ``fvm``, ``price_500`` and ``estimated_price``.
+        DataFrame with columns ``fvm`` and ``price_500``.
     """
 
     quotes = pd.read_csv(quotes_path)
-    cols = [c for c in ["id", "name", "team", "role", "fvm", "price_from_fvm_500"] if c in quotes.columns]
+    cols = [
+        c
+        for c in ["id", "name", "team", "role", "fvm", "price_from_fvm_500"]
+        if c in quotes.columns
+    ]
     df = quotes[cols].rename(columns={"price_from_fvm_500": "price_500"})
 
     df["fvm"] = pd.to_numeric(df["fvm"], errors="coerce").fillna(0)
-    df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce").fillna(0)
-
-    if derived_path and Path(derived_path).exists():
-        derived = pd.read_csv(derived_path)
-        if "estimated_price" in derived.columns:
-            derived["estimated_price"] = pd.to_numeric(
-                derived["estimated_price"], errors="coerce"
-            )
-            df = df.merge(derived[["id", "estimated_price"]], on="id", how="left")
-        else:
-            df["estimated_price"] = np.nan
-    else:
-        df["estimated_price"] = np.nan
+    df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce")
 
     return df
 

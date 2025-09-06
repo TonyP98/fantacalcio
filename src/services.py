@@ -2,70 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import Engine, text
-
-
-PRICE_STRATEGY = Literal["estimated", "fvm500", "blend"]
-
-
-def upsert_players(engine: Engine, df: pd.DataFrame) -> None:
-    """Upsert player records into SQLite ``players`` table.
-
-    Uses ``ON CONFLICT(id) DO UPDATE`` so rerunning imports does not
-    raise duplicate key errors.
-    """
-
-    if df.empty:
-        return
-
-    cols = list(df.columns)
-    placeholders = ", ".join(f":{c}" for c in cols)
-    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
-    stmt = text(
-        f"INSERT INTO players ({', '.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(id) DO UPDATE SET {updates}"
-    )
-    records = df.to_dict(orient="records")
-    with engine.begin() as conn:
-        conn.execute(stmt, records)
-
-
-def choose_price(
-    players: pd.DataFrame,
-    strategy: PRICE_STRATEGY,
-    alpha: float = 0.6,
-) -> pd.Series:
-    """Select an effective price for each player.
-
-    Parameters
-    ----------
-    players:
-        DataFrame with ``price_500`` and ``estimated_price`` columns.
-    strategy:
-        ``"estimated"``, ``"fvm500"`` or ``"blend"``.
-    alpha:
-        Weight for ``estimated_price`` when ``strategy='blend'``.
-    """
-
-    price_500 = pd.to_numeric(players["price_500"], errors="coerce").fillna(0)
-    est = pd.to_numeric(players.get("estimated_price"), errors="coerce")
-
-    if strategy == "estimated":
-        effective = est.fillna(price_500)
-    elif strategy == "fvm500":
-        effective = price_500
-    elif strategy == "blend":
-        blended = est.fillna(price_500)
-        effective = alpha * blended + (1 - alpha) * price_500
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
-
-    return effective.clip(lower=1)
-
 
 # ---------------------------------------------------------------------------
 # Roster optimiser
@@ -90,8 +30,6 @@ def optimize_roster(
     auction_log: pd.DataFrame | None = None,
     budget_total: float = 500,
     team_cap: int = 3,
-    price_strategy: PRICE_STRATEGY = "estimated",
-    alpha: float = 0.6,
     allow_low_mins: bool = False,
     grid_matrix: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
@@ -112,8 +50,9 @@ def optimize_roster(
         acquired_ids = auction_log[auction_log.get("acquired", 0) == 1]["id"].tolist()
         pool = pool[~pool["id"].isin(acquired_ids)]
 
-    pool["effective_price"] = choose_price(pool, price_strategy, alpha)
-    pool["value_score"] = pool["expected_points"] / pool["effective_price"].clip(lower=1)
+    price_500 = pd.to_numeric(pool["price_500"], errors="coerce").fillna(0)
+    pool["effective_price"] = price_500.clip(lower=1)
+    pool["value_score"] = pool["expected_points"] / pool["effective_price"]
 
     selected = []
     spent = 0.0
