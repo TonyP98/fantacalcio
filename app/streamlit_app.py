@@ -431,6 +431,20 @@ else:
     df_roster = df_roster.sort_values(["__k__", "Giocatore"]).drop(columns="__k__")
     st.dataframe(df_roster, use_container_width=True)
 
+    TARGET_ROSTER = {"P": 3, "D": 8, "C": 8, "A": 6}
+    role_counts = df_roster["Ruolo"].value_counts().to_dict()
+    missing_rows = [
+        {
+            "Ruolo": r,
+            "Acquistati": role_counts.get(r, 0),
+            "Target": TARGET_ROSTER[r],
+            "Mancanti": max(TARGET_ROSTER[r] - role_counts.get(r, 0), 0),
+        }
+        for r in TARGET_ROSTER
+    ]
+    st.subheader("Giocatori mancanti per ruolo")
+    st.table(pd.DataFrame(missing_rows))
+
     if st.button("Esporta il mio roster"):
         output_path = Path(OUTPUT_DIR) / "my_roster.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
