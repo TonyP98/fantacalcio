@@ -282,7 +282,11 @@ role_filter = st.selectbox("Ruolo", ["P", "D", "C", "A"])
 
 available_ids = [p.id for p in _list_players(role=role_filter, include_sold=False)]
 top10 = players[(players["role"].eq(role_filter)) & (players["id"].isin(available_ids))]
-top10 = top10.sort_values("price_500", ascending=False).head(10)
+top10 = (
+    top10.sort_values("price_500", ascending=False)
+    .drop_duplicates(subset="name")
+    .head(10)
+)
 st.caption("Top 10 disponibili per price_500")
 st.dataframe(top10[["name", "team", "price_500"]])
 
