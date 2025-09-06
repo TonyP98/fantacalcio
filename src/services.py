@@ -237,6 +237,15 @@ def optimize_roster(
 
     logger = _mk_logger(log)
     df = players.copy()
+    # Deduplicate potential multiple entries for the same player. When the
+    # input dataframe contains duplicates (for example coming from joins or
+    # data glitches), locked players would be counted multiple times and the
+    # optimiser could try to "lock" the same player more than once.
+    if "id" in df.columns:
+        df = df.drop_duplicates(subset=["id"], keep="last")
+    elif {"name", "team"}.issubset(df.columns):
+        df = df.drop_duplicates(subset=["name", "team"], keep="last")
+
     if df.empty:
         logger.error("No players provided.")
         return df
@@ -264,6 +273,12 @@ def optimize_roster(
     # Locked / già acquistati (ora df include anche eventuali non AVAILABLE ma locked)
     if "my_acquired" in df.columns:
         locked = df[df["my_acquired"] == 1].copy()
+        # Ensure each player appears at most once among the locked ones
+        if not locked.empty:
+            if "id" in locked.columns:
+                locked = locked.drop_duplicates(subset=["id"], keep="last")
+            elif {"name", "team"}.issubset(locked.columns):
+                locked = locked.drop_duplicates(subset=["name", "team"], keep="last")
         locked["locked"] = True
         _mp = pd.to_numeric(locked.get("my_price"), errors="coerce")
         locked["eff_price"] = _mp.where(_mp.notna() & (_mp > 0), locked["price_500"])
