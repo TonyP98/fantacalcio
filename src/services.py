@@ -272,9 +272,7 @@ def optimize_roster(
         locked["locked"] = False
         locked["eff_price"] = []
     logger.info(
-        "Locked seen -> total=%d | by role=%s",
-        len(locked),
-        locked["role"].value_counts().to_dict() if not locked.empty else {},
+        f"Locked seen -> total={len(locked)} | by role={locked['role'].value_counts().to_dict() if not locked.empty else {}}"
     )
 
     budget_locked = locked["eff_price"].sum() if not locked.empty else 0.0
