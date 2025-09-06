@@ -50,3 +50,41 @@ def test_optimizer_best_effort_on_low_budget():
     assert len(roster) < sum(ROLES_NEED.values())
     assert roster["budget_left"].iloc[0] >= 0
 
+
+def test_attach_my_roster_from_csv(tmp_path):
+    players = pd.DataFrame({
+        "id": [1, 2],
+        "name": ["A", "B"],
+        "team": ["T1", "T2"],
+    })
+    roster = pd.DataFrame({"id": [2], "my_price": [10]})
+    roster.to_csv(tmp_path / "my_roster.csv", index=False)
+    orig = services.OUTPUT_DIR
+    services.OUTPUT_DIR = str(tmp_path)
+    try:
+        enriched = services.attach_my_roster(players)
+    finally:
+        services.OUTPUT_DIR = orig
+
+    assert list(enriched["my_acquired"]) == [0, 1]
+    assert enriched.loc[1, "my_price"] == 10
+
+
+def test_attach_my_roster_from_session_state():
+    players = pd.DataFrame({
+        "id": [1, 2],
+        "name": ["A", "B"],
+        "team": ["T1", "T2"],
+    })
+
+    class FakeSt:
+        def __init__(self):
+            self.session_state = {
+                "my_roster": [{"id": 1, "my_price": 20}]
+            }
+
+    st = FakeSt()
+    enriched = services.attach_my_roster(players, st)
+    assert list(enriched["my_acquired"]) == [1, 0]
+    assert enriched.loc[0, "my_price"] == 20
+

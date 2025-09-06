@@ -370,23 +370,15 @@ st.subheader("Roster Optimizer")
 budget_total = st.number_input("Total budget", value=500)
 team_cap = st.number_input("Team cap", value=3)
 if st.button("Optimize"):
-    # 🔁 ricarica i players dal DB per includere gli ultimi acquisti
-    try:
-        db_players = db.read_players_df()[["id", "my_acquired", "my_price"]]
-        players = players.drop(columns=["my_acquired", "my_price"], errors="ignore").merge(
-            db_players, on="id", how="left"
-        )
-    except Exception:
-        pass  # fallback: usa 'players' già in memoria
-
-    # ✅ type safety: assicurati che id sia int e che le colonne esistano
-    if "id" in players.columns:
-        players["id"] = pd.to_numeric(players["id"], errors="coerce")
-    for col in ["my_acquired", "my_price"]:
-        if col not in players.columns:
-            players[col] = 0 if col == "my_acquired" else np.nan
-
-    roster = services.optimize_roster(players, st, budget_total, team_cap)
+    # 1) innesta gli acquisti dentro players (CSV o sessione)
+    players_enriched = services.attach_my_roster(players, st)
+    # 2) safety: tipi coerenti
+    if "my_acquired" in players_enriched.columns:
+        players_enriched["my_acquired"] = services._truthy(players_enriched["my_acquired"]).astype(int)
+    if "my_price" in players_enriched.columns:
+        players_enriched["my_price"] = pd.to_numeric(players_enriched["my_price"], errors="coerce")
+    # 3) optimize sul DF arricchito
+    roster = services.optimize_roster(players_enriched, st, budget_total, team_cap)
     roster.to_csv(f"{OUTPUT_DIR}/recommended_roster.csv", index=False)
     cols = ["role", "name", "team", "price_500", "score_raw", "score_z_role"]
     if "cum_budget" in roster.columns:

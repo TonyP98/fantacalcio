@@ -2,10 +2,129 @@
 
 import numpy as np
 import pandas as pd
+import os
+from typing import Optional
 try:  # pragma: no cover - optional dependency
     import pulp
 except Exception:  # pragma: no cover - fallback when pulp is missing
     pulp = None
+
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "data/outputs")
+
+
+def _truthy(s) -> pd.Series:
+    """Converte qualunque colonna (0/1, bool, 'true', 'yes', 'Y') in booleano."""
+    return pd.Series(s).astype(str).str.strip().str.lower().isin([
+        "1",
+        "true",
+        "yes",
+        "y",
+        "si",
+        "s",
+        "x",
+        "\u2713",
+        "\u2714",
+    ])
+
+
+def attach_my_roster(players: pd.DataFrame, st: Optional[object] = None) -> pd.DataFrame:
+    """Arricchisci ``players`` con le colonne ``my_acquired`` e ``my_price``.
+
+    Le informazioni sugli acquisti vengono lette da una delle seguenti sorgenti,
+    in ordine di priorità:
+
+    1. CSV ``my_roster.csv`` in :data:`OUTPUT_DIR` o in ``data/outputs``.
+    2. ``st.session_state.my_roster`` se disponibile.
+    3. ``st.session_state.auction_log`` filtrato per ``acquired == true``.
+
+    L'unione avviene sulla colonna ``id`` se presente, altrimenti sul
+    combinato ``name`` + ``team``. In assenza di una sorgente valida viene
+    aggiunta la colonna ``my_acquired`` a ``0`` e, se assente, ``my_price``
+    con ``NaN``.
+    """
+
+    df = players.copy()
+
+    roster_df = None
+    for path in [
+        os.path.join(OUTPUT_DIR, "my_roster.csv"),
+        os.path.join("data", "outputs", "my_roster.csv"),
+        os.path.join("data", "my_roster.csv"),
+    ]:
+        if os.path.exists(path):
+            try:
+                roster_df = pd.read_csv(path)
+                break
+            except Exception:
+                pass
+
+    if roster_df is None and st is not None and hasattr(st, "session_state"):
+        if "my_roster" in st.session_state:
+            roster_df = pd.DataFrame(st.session_state["my_roster"])
+        elif "auction_log" in st.session_state:
+            al = pd.DataFrame(st.session_state["auction_log"])
+            if not al.empty and "acquired" in al.columns:
+                al = al[_truthy(al["acquired"])]
+                roster_df = al
+
+    if roster_df is None or roster_df.empty:
+        df["my_acquired"] = 0
+        if "my_price" not in df.columns:
+            df["my_price"] = np.nan
+        return df
+
+    r = roster_df.copy()
+
+    if "my_price" not in r.columns:
+        for c in ["price", "paid", "sold_price"]:
+            if c in r.columns:
+                r = r.rename(columns={c: "my_price"})
+                break
+
+    if "id" in df.columns:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce")
+    if "player_id" in df.columns and "id" not in df.columns:
+        df = df.rename(columns={"player_id": "id"})
+        df["id"] = pd.to_numeric(df["id"], errors="coerce")
+
+    if "id" in r.columns:
+        r["id"] = pd.to_numeric(r["id"], errors="coerce")
+        r_key = ["id"]
+    else:
+        for col in ["name", "team"]:
+            if col not in r.columns or col not in df.columns:
+                df["my_acquired"] = 0
+                if "my_price" not in df.columns:
+                    df["my_price"] = np.nan
+                return df
+        r["__key__"] = (
+            r["name"].astype(str).str.strip().str.lower()
+            + "|"
+            + r["team"].astype(str).str.strip().str.lower()
+        )
+        df["__key__"] = (
+            df["name"].astype(str).str.strip().str.lower()
+            + "|"
+            + df["team"].astype(str).str.strip().str.lower()
+        )
+        r_key = ["__key__"]
+
+    subset_cols = r_key
+    if "acquired_at" in r.columns:
+        r = r.sort_values("acquired_at").drop_duplicates(subset=subset_cols, keep="last")
+    else:
+        r = r.drop_duplicates(subset=subset_cols, keep="last")
+
+    if r_key == ["id"] and "id" in df.columns:
+        m = df.merge(r[r_key + ["my_price"]], on="id", how="left")
+    else:
+        m = df.merge(r[r_key + ["my_price"]], on="__key__", how="left")
+        m = m.drop(columns=["__key__"])
+
+    m["my_acquired"] = m["my_price"].notna().astype(int)
+    if "my_price" not in m.columns:
+        m["my_price"] = np.nan
+    return m
 
 
 # --- logging shim -----------------------------------------------------------
@@ -93,7 +212,7 @@ def optimize_roster(
         return df
 
     # Disponibili: NON escludere i locked anche se non "AVAILABLE"
-    is_locked = (df["my_acquired"] == 1) if "my_acquired" in df.columns else False
+    is_locked = _truthy(df["my_acquired"]) if "my_acquired" in df.columns else pd.Series(False, index=df.index)
     if "status" in df.columns:
         df = df[
             df["status"].fillna("AVAILABLE").eq("AVAILABLE") | is_locked
