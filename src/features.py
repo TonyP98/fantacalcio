@@ -12,4 +12,5 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["assists_per90"] = out["assists"] / minutes_factor
     out["form"] = (out["goals"] + out["assists"]) / minutes_factor
     out["availability"] = out["mins"] / (38 * 90)
+    out["expected_points"] = out["goals"] + out["assists"]
     return out
