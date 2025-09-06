@@ -378,6 +378,12 @@ if st.button("Optimize"):
         players_enriched["my_acquired"] = services._truthy(players_enriched["my_acquired"]).astype(int)
     if "my_price" in players_enriched.columns:
         players_enriched["my_price"] = pd.to_numeric(players_enriched["my_price"], errors="coerce")
+    # 2b) escludi i venduti non acquistati da me
+    if "status" in players_enriched.columns:
+        players_enriched = players_enriched[
+            players_enriched["status"].eq("AVAILABLE")
+            | players_enriched["my_acquired"].eq(1)
+        ].copy()
     locked_all = players_enriched.query("my_acquired==1")
     st.caption(f"🔒 Locked che verranno inclusi: {len(locked_all)}")
     locked_preview = locked_all[["role", "name", "team", "my_price", "price_500"]].head(5)

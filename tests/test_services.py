@@ -70,6 +70,21 @@ def test_optimizer_best_effort_on_low_budget():
     assert roster["budget_left"].iloc[0] >= 0
 
 
+def test_optimizer_skips_sold_players_not_acquired():
+    players = _sample_players()
+    sold_idx = players.index[0]
+    keep_idx = players.index[1]
+    players.loc[sold_idx, "status"] = "SOLD"
+    players.loc[keep_idx, "status"] = "SOLD"
+    players.loc[keep_idx, "my_acquired"] = 1
+    players.loc[keep_idx, "my_price"] = 5
+
+    roster = services.optimize_roster(players, logging.getLogger("test"), budget_total=500, team_cap=10)
+    ids = roster["id"].tolist()
+    assert players.loc[sold_idx, "id"] not in ids
+    assert players.loc[keep_idx, "id"] in ids
+
+
 def test_attach_my_roster_from_csv(tmp_path):
     players = pd.DataFrame({
         "id": [1, 2],
@@ -136,6 +151,11 @@ def test_attach_my_roster_from_db(monkeypatch):
             },
         ]
     )
+    # mark player 1 as sold
+    with _db.get_session() as s:
+        p = s.get(_db.Player, 1)
+        p.is_sold = 1
+        s.commit()
     _db.mark_player_acquired(2, 11)
 
     players = pd.DataFrame(
@@ -144,4 +164,6 @@ def test_attach_my_roster_from_db(monkeypatch):
     enriched = services.attach_my_roster(players)
     assert list(enriched["my_acquired"]) == [0, 1]
     assert enriched.loc[1, "my_price"] == 11
+    assert enriched.loc[0, "status"] == "SOLD"
+    assert enriched.loc[1, "status"] == "AVAILABLE"
 
