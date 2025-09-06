@@ -12,9 +12,10 @@ if ROOT not in sys.path:
 import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from src import dataio, services
-from src.db import init_db, upsert_players
+from src.db import init_db, upsert_players, engine, Player
 
 
 # init DB all'avvio
@@ -106,18 +107,32 @@ def append_log(entry: dict) -> None:
     log.to_csv(AUCTION_LOG, index=False)
 
 
+def get_player_from_db(player_id: int):
+    with Session(engine()) as s:
+        return s.get(Player, player_id)
+
+
 players = load_players() if not DISABLED else pd.DataFrame()
 if not players.empty:
     df = players.copy()
-    df["price_500"] = pd.to_numeric(df["price_500"], errors="coerce")
-    df["expected_points"] = pd.to_numeric(df.get("expected_points", 0.0), errors="coerce").fillna(0.0)
+    df["fvm"] = pd.to_numeric(df.get("fvm"), errors="coerce")
+    df["price_500"] = pd.to_numeric(df.get("price_500"), errors="coerce")
+    df["expected_points"] = pd.to_numeric(df.get("expected_points"), errors="coerce")
+
+    mask_missing = df["expected_points"].isna() | (df["expected_points"] <= 0)
+    df.loc[mask_missing, "expected_points"] = df.loc[mask_missing, "fvm"].fillna(0)
+
     df = df.dropna(subset=["price_500"])
     df["price_500"] = df["price_500"].astype(int)
+    df["fvm"] = df["fvm"].fillna(0).astype(int)
+    df["expected_points"] = df["expected_points"].fillna(0.0).astype(float)
+
     rows = df[["id", "name", "team", "role", "fvm", "price_500", "expected_points"]].to_dict("records")
     try:
         upsert_players(rows)
     except SQLAlchemyError as exc:
         st.sidebar.error(f"Failed to upsert players: {exc}")
+    players = df
 st.title("Fantacalcio Roster Optimizer")
 
 if DISABLED:
@@ -136,34 +151,56 @@ if DISABLED:
     st.sidebar.button("Esporta il mio roster", disabled=True)
     st.stop()
 
-players["effective_price"] = pd.to_numeric(players["price_500"], errors="coerce").clip(lower=1)
+players["effective_price"] = players["price_500"].clip(lower=1)
 players["value_score"] = players["expected_points"] / players["effective_price"]
 
 # search bar
 name = st.selectbox("Search player", players["name"].sort_values())
 sel = players[players["name"] == name].iloc[0]
+selected_id = int(sel["id"])
+
+p = get_player_from_db(selected_id)
 
 st.subheader("Player details")
-st.write(
-    {
-        "fvm": sel.get("fvm"),
-        "price_500": sel.get("price_500"),
-        "expected_points": sel.get("expected_points"),
-        "value_score": sel.get("value_score"),
-    }
-)
+if p is not None:
+    value_score = float(p.expected_points) / max(int(p.price_500), 1)
+    st.json(
+        {
+            "fvm": int(p.fvm) if p.fvm is not None else 0,
+            "price_500": int(p.price_500),
+            "expected_points": float(p.expected_points),
+            "value_score": round(value_score, 3),
+        }
+    )
 
-# recommendation badge
-log = read_log()
-state = services.RosterState(
-    budget_residual=500 - pd.to_numeric(log.get("price_paid", 0)).sum(),
-    team_cap=3,
-    team_counts=log[log.get("acquired", 0) == 1]["team"].value_counts().to_dict(),
-    slots_needed={r: services.QUOTAS[r] - log[log.get("acquired", 0) == 1]["role"].value_counts().to_dict().get(r, 0) for r in services.QUOTAS},
-    value_threshold=players["value_score"].quantile(0.6),
-)
-rec = services.recommend_player(sel, state)
-st.markdown(f"**Recommendation:** {rec['label']} - {rec['reason']}")
+    log = read_log()
+    state = services.RosterState(
+        budget_residual=500 - pd.to_numeric(log.get("price_paid", 0)).sum(),
+        team_cap=3,
+        team_counts=log[log.get("acquired", 0) == 1]["team"].value_counts().to_dict(),
+        slots_needed={
+            r: services.QUOTAS[r]
+            - log[log.get("acquired", 0) == 1]["role"].value_counts().to_dict().get(r, 0)
+            for r in services.QUOTAS
+        },
+        value_threshold=players["value_score"].quantile(0.6),
+    )
+
+    sel_row = pd.Series(
+        {
+            "id": p.id,
+            "name": p.name,
+            "team": p.team,
+            "role": p.role,
+            "expected_points": float(p.expected_points),
+            "effective_price": max(int(p.price_500), 1),
+            "value_score": value_score,
+        }
+    )
+    rec = services.recommend_player(sel_row, state)
+    st.markdown(f"**Recommendation:** {rec['label']} - {rec['reason']}")
+else:
+    st.warning("Player not found in DB.")
 
 # auction log form
 st.subheader("Auction log")
@@ -174,10 +211,10 @@ with st.form("auction_form"):
     if submitted:
         append_log(
             {
-                "id": sel["id"],
-                "name": sel["name"],
-                "team": sel["team"],
-                "role": sel["role"],
+                "id": p.id if p is not None else sel["id"],
+                "name": p.name if p is not None else sel["name"],
+                "team": p.team if p is not None else sel["team"],
+                "role": p.role if p is not None else sel["role"],
                 "price_paid": int(price_paid),
                 "acquired": int(acquired),
             }
