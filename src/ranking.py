@@ -33,6 +33,14 @@ def rank_players(
     if role != "ALL" and "role" in data.columns:
         data = data[data["role"] == role]
 
+    # Deduplicate potential multiple entries for the same player so that the
+    # ranking list doesn't contain duplicates. Prefer the last occurrence to be
+    # consistent with ``services.optimize_roster`` behaviour.
+    if "id" in data.columns:
+        data = data.drop_duplicates(subset=["id"], keep="last")
+    elif {"name", "team"}.issubset(data.columns):
+        data = data.drop_duplicates(subset=["name", "team"], keep="last")
+
     price = pd.to_numeric(data.get("price_500"), errors="coerce").fillna(0)
     data["effective_price"] = price.clip(lower=1)
 
